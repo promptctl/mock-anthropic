@@ -184,21 +184,22 @@ describe('login', () => {
     const accountFile = await writeScript(root, 'account.json', account)
     const project = join(root, 'project')
     await mkdir(project)
-    // A project named through a symlink is trusted under its real path, which Claude Code keys by.
+    // A project named through a symlink is trusted under its real path, which Claude Code keys by, and
+    // named both ways it is trusted once.
     const linked = join(root, 'linked')
     await symlink(project, linked)
     const real = await Bun.$`realpath ${project}`.text()
     const configDir = join(root, 'config')
 
     const before = Date.now()
-    const result = await run('login', configDir, '--trust', linked, '--account', accountFile)
+    const result = await run('login', configDir, '--trust', linked, '--trust', project, '--account', accountFile)
     const after = Date.now()
     expect(result.exit).toBe(0)
     expect(result.stdout).toBe('')
     expect(result.record).toMatchObject({
       outcome: 'ok',
       ended_by: null,
-      facts: { config_dir: configDir, account_file: accountFile, trusted: [real.trim()], files: { [CREDENTIALS_FILE]: 'created', [CONFIG_FILE]: 'created', [LEGACY_CONFIG_FILE]: 'absent' }, keychain_removed: keychain },
+      facts: { config_dir: configDir, config_dir_created: true, account_file: accountFile, trusted: [real.trim()], files: { [CREDENTIALS_FILE]: 'created', [CONFIG_FILE]: 'created', [LEGACY_CONFIG_FILE]: 'absent' }, keychain_removed: keychain },
     })
 
     const credentials = await read(configDir, CREDENTIALS_FILE)
@@ -247,7 +248,10 @@ describe('login', () => {
 
     const result = await run('login', configDir)
     expect(result.exit).toBe(0)
-    expect(result.record).toMatchObject({ outcome: 'ok', facts: { files: { [CREDENTIALS_FILE]: 'replaced', [CONFIG_FILE]: 'replaced', [LEGACY_CONFIG_FILE]: 'removed' } } })
+    expect(result.record).toMatchObject({
+      outcome: 'ok',
+      facts: { config_dir_created: false, files: { [CREDENTIALS_FILE]: 'replaced', [CONFIG_FILE]: 'replaced', [LEGACY_CONFIG_FILE]: 'removed' } },
+    })
     const credentials = await read(configDir, CREDENTIALS_FILE)
     expect(credentials.mode).toBe(0o600)
     expect(credentials.value.claudeAiOauth.accessToken).toBe(ACCESS_TOKEN)

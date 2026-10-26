@@ -83,41 +83,44 @@ async function removeKeychainEntries(service: string): Promise<number | null> {
   }
 }
 
-const isErrno = (error: unknown, ...codes: readonly string[]) => error instanceof Error && 'code' in error && codes.includes(String(error.code))
-
 // The config dir, made if it is not there; a path that names something else is a wrong command line.
-async function configDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true }).catch((error: unknown) => {
-    throw isErrno(error, 'EEXIST', 'ENOTDIR') ? new UsageError(`<config-dir> ${path}: not a directory`, { cause: error }) : error
+// Returns whether it made it.
+async function configDirectory(path: string): Promise<boolean> {
+  const made = await mkdir(path, { recursive: true }).catch((error: NodeJS.ErrnoException) => {
+    throw error.code === 'EEXIST' || error.code === 'ENOTDIR' ? new UsageError(`<config-dir> ${path}: not a directory`, { cause: error }) : error
   })
+  return made !== undefined
 }
 
 // Whether `path` has a directory entry: lstat, so a symlink, dangling or not, is one.
 async function present(path: string): Promise<boolean> {
   return lstat(path).then(
     () => true,
-    (error: unknown) => {
-      if (isErrno(error, 'ENOENT')) return false
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false
       throw error
     },
   )
 }
 
-// Written beside the target and renamed over it: a replaced file takes the mode (an in-place write
-// keeps the old file's), and a Claude Code reading the directory never sees half a file. 0600, as
-// Claude Code writes both files itself (utils/config.ts:1139, plainTextStorage.ts:61).
-async function writeWhole(dir: string, file: LoginFile): Promise<'created' | 'replaced'> {
-  const path = join(dir, file.name)
-  const before = (await present(path)) ? 'replaced' : 'created'
-  const temporary = join(dir, `${file.name}.${randomUUID()}.tmp`)
+// Every file is written whole beside its target before any is renamed over one, so a write that fails
+// replaces nothing, and a Claude Code reading the directory never sees half a file. A replaced file
+// takes the mode (an in-place write keeps the old file's): 0600, as Claude Code writes both files
+// itself (utils/config.ts:1139, plainTextStorage.ts:61).
+async function writeWhole(dir: string, files: readonly LoginFile[]): Promise<readonly (readonly [LoginFile['name'], 'created' | 'replaced'])[]> {
+  const staged = files.map(file => ({ file, path: join(dir, file.name), temporary: join(dir, `${file.name}.${randomUUID()}.tmp`) }))
+  const outcomes: (readonly [LoginFile['name'], 'created' | 'replaced'])[] = []
   try {
-    await writeFile(temporary, `${JSON.stringify(file.value, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
-    await rename(temporary, path)
-  } catch (error) {
-    await rm(temporary, { force: true })
-    throw error
+    for (const { file, temporary } of staged) await writeFile(temporary, `${JSON.stringify(file.value, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    for (const { file, path, temporary } of staged) {
+      outcomes.push([file.name, (await present(path)) ? 'replaced' : 'created'])
+      await rename(temporary, path)
+    }
+  } finally {
+    // A renamed temporary is gone already; any other is removed, whether or not the login failed.
+    await Promise.all(staged.map(({ temporary }) => rm(temporary, { force: true })))
   }
-  return before
+  return outcomes
 }
 
 // Claude Code 2.1.289 reads `.config.json`, an older global config, in place of CONFIG_FILE whenever
@@ -125,15 +128,18 @@ async function writeWhole(dir: string, file: LoginFile): Promise<'created' | 're
 export const LEGACY_CONFIG_FILE = '.config.json'
 
 async function removeLegacyConfig(dir: string): Promise<'removed' | 'absent'> {
-  const path = join(dir, LEGACY_CONFIG_FILE)
-  if (!(await present(path))) return 'absent'
-  await rm(path)
-  return 'removed'
+  return rm(join(dir, LEGACY_CONFIG_FILE)).then(
+    () => 'removed' as const,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return 'absent' as const
+      throw error
+    },
+  )
 }
 
 export const login: Command = {
   kind: 'task',
-  usage: '<config-dir> [--trust DIR]... [--account FILE]',
+  usage: '<config-dir> [--trust <project-dir>]... [--account FILE]',
   async run(args) {
     const {
       flags,
@@ -141,20 +147,23 @@ export const login: Command = {
     } = parse(args, { trust: { type: 'string', multiple: true, default: [] }, account: { type: 'string' } }, ['config-dir'])
     // NFC, as Claude Code reads CLAUDE_CONFIG_DIR (utils/envUtils.ts:7), so the keychain name matches.
     const configDir = commandLinePath('<config-dir>', dir).normalize('NFC')
-    const trusted = await Promise.all(flags.trust.map(trustKey))
+    // One entry per project, however many spellings of it were given: `projects` holds one key for it.
+    const trusted = [...new Set(await Promise.all(flags.trust.map(trustKey)))]
     const accountFile = flags.account === undefined ? null : commandLinePath('--account', flags.account)
     const account = await accountFrom(accountFile)
-    await configDirectory(configDir)
-    const files = await Promise.all(loginFiles(account, trusted, Date.now()).map(async file => [file.name, await writeWhole(configDir, file)] as const))
+    const created = await configDirectory(configDir)
+    const files = await writeWhole(configDir, loginFiles(account, trusted, Date.now()))
     const legacy = await removeLegacyConfig(configDir)
     // Last: the keychain entry is an earlier login's, removed only once this one is written.
     const keychain = await removeKeychainEntries(keychainService(configDir))
     return {
       outcome: 'ok',
-      // [LAW:nothing-unseen] Where the login went, which account won (null: the default), what is
-      // trusted, what this login replaced or removed, and how many keychain entries it removed.
+      // [LAW:nothing-unseen] Where the login went and whether it made the directory, which account won
+      // (null: the default), what is trusted, what this login replaced or removed, and how many
+      // keychain entries it removed.
       facts: {
         config_dir: configDir,
+        config_dir_created: created,
         account_file: accountFile,
         trusted,
         files: { ...Object.fromEntries(files), [LEGACY_CONFIG_FILE]: legacy },
