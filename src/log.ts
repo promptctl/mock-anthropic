@@ -15,12 +15,21 @@ export type CommandResult = { readonly facts: Facts } & (
 // command's when it returned, and `{}` when it threw or never ran.
 export type Ending = CommandResult | { readonly facts: Facts; readonly outcome: 'usage' | 'failed'; readonly why: string }
 
+// The signals that ask an invocation to end.
+export const SIGNALS = ['SIGHUP', 'SIGINT', 'SIGTERM'] as const
+export type Signal = (typeof SIGNALS)[number]
+
+// What first asked an invocation to end: a signal, an error nobody caught, or null when its command
+// finished by itself.
+export type EndedBy = Signal | 'crash' | null
+
 // [LAW:nothing-unseen] One record per invocation, whatever ended it, with the exit code it ended with.
 export type CommandEvent = {
   readonly event: 'command'
   readonly argv: readonly string[]
   readonly duration_ms: number
   readonly exit: number
+  readonly ended_by: EndedBy
 } & Ending
 
 // [LAW:one-source-of-truth] The one statement of PROJECT.md's exit codes: 0 success, 1 the answer is

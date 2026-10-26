@@ -34,19 +34,18 @@ export const serve: Command = {
     })
     const { ca, leaf } = server.certificates
     process.stdout.write(`${JSON.stringify({ port: server.port, ca: ca.certPath })}\n`)
-    const reason = await ended
+    await ended
     await server.stop()
     return {
       outcome: 'ok',
-      // [LAW:nothing-unseen] Which account won (null: the default), where each certificate came from,
-      // and what ended the run.
+      // [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
+      // from. What ended the run is the dispatcher's to record.
       facts: {
         port: server.port,
         ca: ca.certPath,
         account_file: accountFile,
         scenarios,
         certificates: { ca: ca.outcome, leaf: leaf.outcome },
-        ended: 'signal' in reason ? reason.signal : 'crashed',
       },
     }
   },

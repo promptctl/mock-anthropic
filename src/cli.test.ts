@@ -3,6 +3,7 @@ import net from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_ACCOUNT, syntheticUuid } from './account.ts'
+import type { Signal } from './log.ts'
 import { scriptDirectories, writeScript } from './testing.ts'
 
 // The command line as a consumer meets it: `bun src/cli.ts`, spawned, read through its stdout and
@@ -106,7 +107,8 @@ describe('serve', () => {
       outcome: 'ok',
       exit: 0,
       duration_ms: expect.any(Number),
-      facts: { port: mock.ready.port, ca: mock.ready.ca, account_file: null, scenarios: [], ended: 'SIGTERM' },
+      ended_by: 'SIGTERM',
+      facts: { port: mock.ready.port, ca: mock.ready.ca, account_file: null, scenarios: [] },
     })
     const { certificates } = stopped.record.facts as { certificates: Record<string, string> }
     expect(Object.keys(certificates).sort()).toEqual(['ca', 'leaf'])
@@ -148,7 +150,7 @@ process.exitCode = await main(COMMANDS, ['serve', '--port', '0'])
     const child = spawn([script])
     const result = await finished(child, new Response(child.stdout).text())
     expect(result.exit).toBe(1)
-    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: { account_file: null, ended: 'crashed' } })
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, ended_by: 'crash', facts: { account_file: null } })
     expect(result.record.why).toContain('nobody caught this')
   })
 
@@ -186,7 +188,7 @@ describe('a wrong command line', () => {
       const result = await run(...args)
       expect(result.exit).toBe(2)
       expect(result.stdout).toBe('')
-      expect(result.record).toMatchObject({ outcome: 'usage', exit: 2, argv: args, facts: {} })
+      expect(result.record).toMatchObject({ outcome: 'usage', exit: 2, argv: args, ended_by: null, facts: {} })
       expect(result.record.why).toContain(named)
     })
   }
@@ -222,7 +224,7 @@ process.exitCode = await main({ stand_in: { kind: '${kind}', usage: '', run: ${r
   return {
     // The command's next `say`: once it is read, a signal sent next finds the dispatcher listening.
     said: () => stdout.next(),
-    signal: (signal: 'SIGINT' | 'SIGTERM') => child.kill(signal),
+    signal: (signal: Signal) => child.kill(signal),
     finished: async () => ({ ...(await finished(child, stdout.rest())), cleanedUp: await Bun.file(marker).exists() }),
   }
 }
@@ -247,7 +249,7 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
         )
       ).finished()
       expect(result.exit).toBe(1)
-      expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: { ended: 'crashed' } })
+      expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, ended_by: 'crash', facts: { ended: 'crashed' } })
       expect(result.record.why).toContain(message)
       expect(result.stderr.filter(line => line.startsWith('FAILED '))).toHaveLength(1)
       expect(result.cleanedUp).toBe(true)
@@ -261,14 +263,17 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
     })
   }
 
-  test('a signal ends a task at once, with a FAILED record naming it', async () => {
-    const running = await dispatch('task', body(`say('running')\nawait forever`))
-    expect(await running.said()).toBe('running')
-    running.signal('SIGTERM')
-    const result = await running.finished()
-    expect(result.exit).toBe(1)
-    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGTERM before the command finished' })
-  })
+  // PROJECT.md's signals, listed here so a signal the dispatcher stops hearing fails its test.
+  for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM'] as const) {
+    test(`${signal} ends a task at once, with a FAILED record naming it`, async () => {
+      const running = await dispatch('task', body(`say('running')\nawait forever`))
+      expect(await running.said()).toBe('running')
+      running.signal(signal)
+      const result = await running.finished()
+      expect(result.exit).toBe(1)
+      expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, ended_by: signal, why: `${signal} before the command finished` })
+    })
+  }
 
   test('a second signal ends a service that is still stopping, with its record', async () => {
     const running = await dispatch('service', body(`say('running')\nawait ended\nsay('stopping')\nawait forever`))
@@ -279,6 +284,25 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
     const result = await running.finished()
     expect(result.exit).toBe(1)
     expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGINT before the command finished\nSIGINT while the command was ending' })
+  })
+
+  test('one signal after a crash does not abandon the service it finds stopping', async () => {
+    const running = await dispatch(
+      'service',
+      body(`setTimeout(() => reportError(new Error('the sink broke')), 10)
+await ended
+const signalled = new Promise(resolve => process.once('SIGTERM', resolve))
+say('stopping')
+await signalled
+await Bun.write(marker, 'yes')
+return { outcome: 'ok', facts: { stopped: 'cleanly' } }`),
+    )
+    expect(await running.said()).toBe('stopping')
+    running.signal('SIGTERM')
+    const result = await running.finished()
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, ended_by: 'crash', facts: { stopped: 'cleanly' } })
+    expect(result.record.why).toContain('SIGTERM while the command was ending')
+    expect(result.cleanedUp).toBe(true)
   })
 
   test('the record of an abandoned command reaches a reader that is behind on stderr', async () => {
