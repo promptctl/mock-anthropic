@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -62,8 +63,17 @@ func (e *UsageError) Error() string { return e.Why }
 // Signals are the signals that ask an invocation to end, by the names its record gives them.
 var Signals = map[os.Signal]string{syscall.SIGHUP: "SIGHUP", syscall.SIGINT: "SIGINT", syscall.SIGTERM: "SIGTERM"}
 
+// Notify delivers every one of the Signals to a channel, the one the process hands Main.
+func Notify() <-chan os.Signal {
+	signals := make(chan os.Signal, len(Signals))
+	for sig := range Signals {
+		signal.Notify(signals, sig)
+	}
+	return signals
+}
+
 // Record is the one record of an invocation. EndedBy is the signal that first asked it to end, "crash"
-// for a panic nobody recovered, or nil when its command finished by itself.
+// for a panic nobody recovered or a Run that never returned, or nil when its command finished by itself.
 type Record struct {
 	Event      string   `json:"event"`
 	Argv       []string `json:"argv"`
@@ -111,7 +121,11 @@ func Main(commands Commands, argv []string, stderr io.Writer, signals <-chan os.
 	line, err := json.Marshal(record)
 	if err != nil {
 		// Facts that cannot be JSON are the mock's own failure; the record still goes out, without them.
-		record.Outcome, record.Exit, record.Why, record.Facts = Failed, 1, fmt.Sprintf("%s\nrecording facts: %v", record.Why, err), Facts{}
+		why := []string{fmt.Sprintf("recording facts: %v", err)}
+		if record.Why != "" {
+			why = append([]string{record.Why}, why...)
+		}
+		record.Outcome, record.Exit, record.Why, record.Facts = Failed, ExitCode(Failed), strings.Join(why, "\n"), Facts{}
 		line, _ = json.Marshal(record)
 	}
 	fmt.Fprintf(stderr, "%s %s\n", strings.ToUpper(string(record.Outcome)), line)
@@ -148,12 +162,16 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	defer cancel()
 	done := make(chan settled, 1)
 	go func() {
+		returned := false
 		defer func() {
 			if p := recover(); p != nil {
 				done <- settled{crash: fmt.Sprintf("panic: %v\n%s", p, debug.Stack())}
+			} else if !returned {
+				done <- settled{crash: "the command exited without returning (runtime.Goexit)"}
 			}
 		}()
 		result, err := cmd.Run(ctx, argv[1:])
+		returned = true
 		done <- settled{result: result, err: err}
 	}()
 
@@ -176,7 +194,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
 			case s.err != nil:
-				return failed(ends, s.err, Facts{}), ends
+				return failed(ends, s.err, s.result.Facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
 				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
 			}

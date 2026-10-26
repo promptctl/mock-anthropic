@@ -3,8 +3,6 @@ package main
 
 import (
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 )
@@ -13,7 +11,5 @@ import (
 var Commands = command.Commands{}
 
 func main() {
-	signals := make(chan os.Signal, len(command.Signals))
-	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
-	os.Exit(command.Main(Commands, os.Args[1:], os.Stderr, signals))
+	os.Exit(command.Main(Commands, os.Args[1:], os.Stderr, command.Notify()))
 }

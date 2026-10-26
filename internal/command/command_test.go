@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -98,12 +100,43 @@ func TestCommandUsageError(t *testing.T) {
 
 func TestCommandError(t *testing.T) {
 	exit, record, _ := run(t, task(func(context.Context, []string) (Result, error) {
-		return Result{Facts: Facts{"dropped": true}}, errors.New("the command broke")
+		return Result{Facts: Facts{"removed": 1}}, errors.New("the command broke")
 	}), []string{"stand_in"}, nil)
 	if exit != 1 {
 		t.Errorf("exit %d, want 1", exit)
 	}
-	expect(t, record, map[string]any{"outcome": "failed", "why": "the command broke", "ended_by": nil, "facts": map[string]any{}})
+	expect(t, record, map[string]any{"outcome": "failed", "why": "the command broke", "ended_by": nil, "facts": map[string]any{"removed": 1}})
+}
+
+func TestAnswerNeitherOKNorNo(t *testing.T) {
+	exit, record, _ := run(t, task(func(context.Context, []string) (Result, error) {
+		return Result{Answer: Usage, Facts: Facts{"kept": true}}, nil
+	}), []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "why": `command answered "usage", not ok or no`, "facts": map[string]any{"kept": true}})
+}
+
+func TestFactsThatAreNotJSON(t *testing.T) {
+	exit, record, _ := run(t, task(func(context.Context, []string) (Result, error) {
+		return Result{Answer: OK, Facts: Facts{"x": math.NaN()}}, nil
+	}), []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "exit": 1, "why": "recording facts: json: unsupported value: NaN", "facts": map[string]any{}})
+}
+
+func TestGoexitIsACrash(t *testing.T) {
+	exit, record, _ := run(t, task(func(context.Context, []string) (Result, error) {
+		runtime.Goexit()
+		return Result{}, nil
+	}), []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: the command exited without returning (runtime.Goexit)"})
 }
 
 func TestPanicIsACrash(t *testing.T) {
