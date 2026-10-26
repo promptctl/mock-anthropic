@@ -45,9 +45,9 @@ export async function dispatch<R extends EndpointRow>(
     case 'response':
       return { verdict: { outcome: 'served' }, response: decision.response }
     case 'declined':
-      return { verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse(400, 'UNMATCHED', request, decision.why) }
+      return { verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse('UNMATCHED', request, decision.why) }
     case 'failed':
-      return { verdict: { outcome: 'failed', why: decision.why }, response: errorResponse(500, 'FAILED', request, decision.why) }
+      return { verdict: { outcome: 'failed', why: decision.why }, response: errorResponse('FAILED', request, decision.why) }
   }
 }
 
@@ -77,14 +77,14 @@ async function decide<R extends EndpointRow>(
 
 // The Anthropic API's error envelope, so Claude Code shows the message, and `x-should-retry: false`,
 // which the Anthropic SDK obeys, so a gap is one loud error and not a run of slow retries. Every error
-// response the mock makes for a request is this one.
-export function errorResponse(
-  status: 400 | 500,
-  label: 'UNMATCHED' | 'FAILED',
-  request: Pick<MockRequest, 'method' | 'url'>,
-  why: string,
-): Response {
-  const type = status === 400 ? 'invalid_request_error' : 'api_error'
+// response the mock makes for a request is this one, and its label decides its status and type.
+const ERRORS = {
+  UNMATCHED: { status: 400, type: 'invalid_request_error' },
+  FAILED: { status: 500, type: 'api_error' },
+} as const
+
+export function errorResponse(label: keyof typeof ERRORS, request: Pick<MockRequest, 'method' | 'url'>, why: string): Response {
+  const { status, type } = ERRORS[label]
   const message = `mock-anthropic ${label}: ${request.method} ${request.url.hostname} ${request.url.pathname}: ${why}`
   return Response.json(
     { type: 'error', error: { type, message } },

@@ -267,6 +267,19 @@ describe('streamed bodies', () => {
     expect(requestLines(mock).map(line => line.split(' ')[0])).toEqual(['ABORTED'])
   })
 
+  test('a request body Bun.serve rejects as malformed is recorded ABORTED by the mock, as its connection is', async () => {
+    const mock = await start()
+    const reply = await raw(mock.server.port, `POST /hello HTTP/1.1\r\nHost: ${API}\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n`)
+    expect(reply).toStartWith('HTTP/1.1 400 Bad Request')
+    expect(record(await mock.line('ABORTED '))).toMatchObject({
+      endpoint: 'hello',
+      status: null,
+      why: 'the mock closed the connection before the request body finished',
+    })
+    expect(record(await mock.line('CLOSED '))).toMatchObject({ event: 'connection', requests: 1, closed_by: 'server' })
+    await mock.server.stop()
+  })
+
   test('a client that hangs up partway through its request body is recorded ABORTED', async () => {
     const mock = await start()
     ;(await halfBody(mock.server.port)).destroy()
@@ -389,6 +402,7 @@ describe('a plain connection that is not served', () => {
     ['a malformed request line', 'GARBAGE\r\n', 'malformed request line: "GARBAGE\\r"'],
     ['an HTTP version the mock does not speak', 'GET /hello HTTP/9.9\r\n', 'malformed request line: "GET /hello HTTP/9.9\\r"'],
     ['a request line ended by a bare LF', 'GET /hello HTTP/1.1\n', 'malformed request line: "GET /hello HTTP/1.1"'],
+    ['a method in lower case', 'get /hello HTTP/1.1\r\n', 'malformed request line: "get /hello HTTP/1.1\\r"'],
   ] as const) {
     test(`${name} is refused at once with a 400 naming it`, async () => {
       const mock = await start()
@@ -414,7 +428,7 @@ describe('a plain connection that is not served', () => {
       event: 'connection',
       tunnel: null,
       requests: 0,
-      why: 'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it',
+      why: 'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head leaves this way too',
     })
     await mock.server.stop()
   })
@@ -438,6 +452,16 @@ describe('a plain connection that is not served', () => {
 })
 
 describe('CONNECT refusals', () => {
+  for (const target of [`user@${API}:443`, `${API}/x:443`]) {
+    test(`a target with more than a host and port (${target}) is refused as malformed`, async () => {
+      const mock = await start()
+      const reply = await raw(mock.server.port, `CONNECT ${target} HTTP/1.1\r\nHost: ${API}:443\r\n\r\n`)
+      expect(reply).toEndWith(`mock-anthropic REFUSED: CONNECT ${target}: malformed CONNECT target\n`)
+      expect(record(await mock.line('REFUSED '))).toMatchObject({ host: target, port: null, why: 'malformed CONNECT target' })
+      await mock.server.stop()
+    })
+  }
+
   test('a CONNECT head that never ends is refused once it passes the limit', async () => {
     const mock = await start()
     const reply = await raw(mock.server.port, `CONNECT ${API}:443 HTTP/1.1\r\nX: ${'a'.repeat(70000)}`)
@@ -565,5 +589,29 @@ describe('starting', () => {
     await expect(startServer({ port, table: TABLE, generators: generators().generators, certsDir, emit: () => {} })).rejects.toThrow()
     expect(await socketDirs()).toEqual(before)
     await new Promise(resolve => taken.close(resolve))
+  })
+})
+
+describe("the consumer's sink", () => {
+  // reportError fails whatever test runs it, so the mock runs in a process of its own, whose exit code
+  // and output are what is checked.
+  test('one that throws is reported loudly, and the request, its connection and stop() all still settle', async () => {
+    const script = `
+      import { startServer } from ${JSON.stringify(join(import.meta.dir, 'server.ts'))}
+      import { API, buildEndpointTable } from ${JSON.stringify(join(import.meta.dir, 'endpoints.ts'))}
+      const table = buildEndpointTable([{ id: 'hello', host: API, method: 'GET', path: '/hello', scope: 'in-scope' }])
+      const lines = []
+      const emit = event => { if (lines.push(event.outcome) === 1) throw new Error('the sink broke') }
+      const server = await startServer({ port: 0, table, generators: { hello: () => ({ kind: 'response', response: new Response('hi') }) }, certsDir: ${JSON.stringify(certsDir)}, emit })
+      const response = await fetch('http://127.0.0.1:' + server.port + '/hello')
+      console.log(response.status, await response.text())
+      await server.stop()
+      console.log('stopped', lines.join(','))
+    `
+    const child = Bun.spawn([process.execPath, '-e', script], { stdout: 'pipe', stderr: 'pipe' })
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    expect(stdout).toBe('200 hi\nstopped served,closed\n')
+    expect(stderr).toContain('the sink broke')
+    expect(code).toBe(1)
   })
 })

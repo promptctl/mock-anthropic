@@ -26,7 +26,7 @@ It is the one shared mock for all of our projects. It replaces the copy in `bran
 The mock listens on `127.0.0.1` on one port and accepts requests in two ways:
 
 - **As an HTTPS forward proxy.** The program under test sets `HTTPS_PROXY` (and the other proxy variables Claude Code reads) to the mock, and `NODE_EXTRA_CA_CERTS` to the mock's CA certificate. The mock answers `CONNECT` to port 443 of every known host with a certificate signed by its own CA. The CA and the leaf certificate are generated with `openssl` on first start. A `CONNECT` to a host the mock does not know, or to any other port, is refused with a 403 that names it.
-- **As a plain origin.** A request sent straight to the mock's port (for example, from a proxy the program puts in front of Claude Code with the mock as its upstream) is answered as if it had been addressed to `api.anthropic.com`. A request whose target names another host (`GET http://example.com/`, as an `HTTP_PROXY` client sends) is refused with a 403 that names the host.
+- **As a plain origin.** A request sent straight to the mock's port (for example, from a proxy the program puts in front of Claude Code with the mock as its upstream) is answered as if it had been addressed to `api.anthropic.com`. A connection whose first request names another host in its target (`GET http://example.com/`, as an `HTTP_PROXY` client sends every request) is refused with a 403 that names the host.
 
 ## Inputs
 
@@ -97,7 +97,7 @@ A `coverage` command lists every endpoint as answered or out of scope, and exits
 ## Failure behavior
 
 - A request with no endpoint, an out-of-scope endpoint, or a Messages request that no script and no built-in matches gets a 400. The body names the method, host, path, and why. The mock also writes one `UNMATCHED` line on stderr.
-- A refused `CONNECT` writes a `REFUSED` line on stderr. So does a plain request addressed to another host, and a connection that does not open with an HTTP request line, such as TLS sent straight to the port.
+- A refused `CONNECT` writes a `REFUSED` line on stderr. So does a plain connection whose first request is addressed to another host, and a connection that does not open with an HTTP request line, such as TLS sent straight to the port.
 - A failure of the mock's own writes a `FAILED` line: a generator that throws (the client gets a 500), a response body that breaks partway, or a connection that closes before any request reaches the mock (for a tunnel, most often a client that does not trust the CA).
 - Every request and every connection writes exactly one line, starting with its outcome: `SERVED`, `UNMATCHED`, `FAILED` or `ABORTED` for a request, `CLOSED`, `REFUSED` or `FAILED` for a connection.
 - A consumer test can therefore fail on any `UNMATCHED`, `REFUSED` or `FAILED` line, and should.
