@@ -23,19 +23,25 @@ export class UsageError extends Error {
   override name = 'UsageError'
 }
 
-// [LAW:single-enforcer] The one parse of a command's flags: unknown flags, positionals, and a flag that
-// takes one value given twice are refused, and every refusal of parseArgs's becomes a UsageError.
-export function parse<const O extends ParseArgsOptionsConfig>(args: readonly string[], options: O) {
-  const { values, tokens } = parseFlags(args, options)
+// [LAW:single-enforcer] The one parse of a command line: its flags, and its positionals, one per name in
+// `names`. Unknown flags, a missing or extra positional, and a flag that takes one value given twice are
+// refused, and every refusal of parseArgs's becomes a UsageError.
+export function parse<const O extends ParseArgsOptionsConfig, const P extends readonly string[]>(args: readonly string[], options: O, names: P) {
+  const { values, positionals, tokens } = parseFlags(args, options)
   for (const [name, option] of Object.entries(options)) {
     if (option.multiple !== true && tokens.filter(token => token.kind === 'option' && token.name === name).length > 1) throw new UsageError(`--${name}: given more than once`)
   }
-  return values
+  const extra = positionals.slice(names.length)
+  if (extra.length > 0) throw new UsageError(`unexpected argument: ${extra.join(' ')}`)
+  const missing = names.slice(positionals.length)
+  if (missing.length > 0) throw new UsageError(`missing ${missing.map(name => `<${name}>`).join(' ')}`)
+  // The checks above leave exactly one positional per name, which parseArgs's string[] cannot say.
+  return { flags: values, positionals: positionals as { readonly [K in keyof P]: string } }
 }
 
 function parseFlags<const O extends ParseArgsOptionsConfig>(args: readonly string[], options: O) {
   try {
-    return parseArgs({ args: [...args], options, strict: true, allowPositionals: false, tokens: true })
+    return parseArgs({ args: [...args], options, strict: true, allowPositionals: true, tokens: true })
   } catch (error) {
     if (error instanceof TypeError && 'code' in error && String(error.code).startsWith('ERR_PARSE_ARGS_')) throw new UsageError(error.message)
     throw error

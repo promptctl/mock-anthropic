@@ -40,7 +40,7 @@ export function coverageCommand<R extends EndpointRow>(table: EndpointTable<R>, 
     kind: 'task',
     usage: '',
     async run(args) {
-      parse(args, {})
+      parse(args, {}, [])
       const coverage = coverageOf(table, generators)
       process.stdout.write(listing(coverage))
       const ids = (status: Covered['status']) => coverage.filter(covered => covered.status === status).map(covered => covered.row.id)
