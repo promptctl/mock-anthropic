@@ -218,6 +218,10 @@ func TestForeignUUIDsFindsEveryOtherUUIDShape(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("ForeignUUIDs = %v, want %v", got, want)
 	}
+	hidden := SyntheticUUID(0xabcd1234) + "-5678-4abc-8ef0-123456789abc"
+	if got, want := ForeignUUIDs([]byte(hidden)), strings.Index(hidden, "abcd1234-5678"); !slices.Equal(got, []int{want}) {
+		t.Errorf("a UUID overlapping a synthetic one's tail: ForeignUUIDs = %v, want [%d]", got, want)
+	}
 	if got := ForeignUUIDs([]byte(synthetic + SyntheticUUID(1))); got != nil {
 		t.Errorf("synthetic UUIDs reported as foreign at %v", got)
 	}

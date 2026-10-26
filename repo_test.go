@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +16,11 @@ import (
 	"github.com/promptctl/mock-anthropic/internal/account"
 )
 
-// PROJECT.md Acceptance: the repository contains no real identifiers. Every blob in the index, markdown
-// included, is scanned as bytes: the index is what a commit carries, so the working tree's edits and
-// unstaged deletions neither hide nor invent a hit. A hit is reported by offset, never by value, so a
-// failing run does not copy a real identifier into a public CI log.
+// PROJECT.md Acceptance: the repository contains no real identifiers. Every tracked path is scanned as
+// bytes, markdown included, twice: its index blob, which is what a commit carries, and its working-tree
+// copy, which is what the next `git commit -a` carries. A path deleted from the working tree has only
+// its blob. A hit is reported by offset, never by value, so a failing run does not copy a real
+// identifier into a public CI log.
 func TestTrackedFilesCarryNoForeignUUIDs(t *testing.T) {
 	root := strings.TrimSpace(string(git(t, nil, "rev-parse", "--show-toplevel")))
 	wd, err := os.Getwd()
@@ -27,7 +29,7 @@ func TestTrackedFilesCarryNoForeignUUIDs(t *testing.T) {
 	}
 	// Outside this repo's own checkout (a module cache inside some other work tree), the index is not ours.
 	if same, err := sameDir(root, wd); err != nil || !same {
-		t.Fatalf("test runs in %s, but the git top level is %s: not this repository's checkout (%v)", wd, root, err)
+		t.Fatalf("test runs in %s, but the git top level is %s: not this repository's checkout (err: %v)", wd, root, err)
 	}
 	var objects bytes.Buffer
 	var names []string
@@ -44,15 +46,42 @@ func TestTrackedFilesCarryNoForeignUUIDs(t *testing.T) {
 		objects.WriteString(f[1] + "\n")
 		names = append(names, name)
 	}
-	out := bufio.NewReader(bytes.NewReader(git(t, &objects, "cat-file", "--batch")))
+	// Streamed, so memory is bounded by the largest blob rather than the whole tree.
+	cmd := exec.Command("git", "cat-file", "--batch")
+	cmd.Stdin = &objects
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	out := bufio.NewReader(pipe)
 	for _, name := range names {
-		data, err := readBlob(out)
+		blob, err := readBlob(out)
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatalf("%s: %v (git: %s)", name, err, bytes.TrimSpace(stderr.Bytes()))
 		}
-		for _, offset := range account.ForeignUUIDs(data) {
-			t.Errorf("%s: foreign UUID at byte %d", name, offset)
+		scan(t, name+" (index)", blob)
+		switch file, err := os.ReadFile(filepath.Join(root, name)); {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			t.Errorf("%s: %v", name, err)
+		default:
+			scan(t, name+" (working tree)", file)
 		}
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("git cat-file --batch: %v: %s", err, bytes.TrimSpace(stderr.Bytes()))
+	}
+}
+
+func scan(t *testing.T, where string, data []byte) {
+	t.Helper()
+	for _, offset := range account.ForeignUUIDs(data) {
+		t.Errorf("%s: foreign UUID at byte %d", where, offset)
 	}
 }
 

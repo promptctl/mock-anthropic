@@ -44,12 +44,20 @@ var uuidShape = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 // ForeignUUIDs returns the byte offset of every UUID-shaped string in data that IsSyntheticUUID does
 // not recognize. Offsets, not values: a caller reporting a hit must not copy a real identifier onward.
+// The scan resumes one byte past each match's start, so no match, synthetic or not, hides a UUID that
+// overlaps its tail.
 func ForeignUUIDs(data []byte) []int {
 	var foreign []int
-	for _, m := range uuidShape.FindAllIndex(data, -1) {
-		if !IsSyntheticUUID(string(data[m[0]:m[1]])) {
-			foreign = append(foreign, m[0])
+	for at := 0; at < len(data); {
+		m := uuidShape.FindIndex(data[at:])
+		if m == nil {
+			break
 		}
+		start := at + m[0]
+		if !syntheticForm.Match(data[start : at+m[1]]) {
+			foreign = append(foreign, start)
+		}
+		at = start + 1
 	}
 	return foreign
 }
