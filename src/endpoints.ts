@@ -12,11 +12,18 @@ type Route = { id: string; host: string; method: Method; path: string }
 // out-of-scope row cannot be written without its reason.
 export type EndpointRow = Route & ({ scope: 'in-scope' } | { scope: 'out-of-scope'; reason: string })
 
-function inScope<const Id extends string>(id: Id, host: string, method: Method, path: string) {
+// `const` keeps each path's literal type, so ParamName can read a row's params from it.
+function inScope<const Id extends string, const Path extends string>(id: Id, host: string, method: Method, path: Path) {
   return { id, host, method, path, scope: 'in-scope' } as const
 }
 
-function outOfScope<const Id extends string>(id: Id, host: string, method: Method, path: string, reason: string) {
+function outOfScope<const Id extends string, const Path extends string>(
+  id: Id,
+  host: string,
+  method: Method,
+  path: Path,
+  reason: string,
+) {
   return { id, host, method, path, scope: 'out-of-scope', reason } as const
 }
 
@@ -210,17 +217,26 @@ export type EndpointTable<R extends EndpointRow = Row> = {
 
 const PARAM_SEGMENT = /^([^{}]*)\{([a-z_]+)\}([^{}]*)$/
 
-// The text a WHATWG URL's pathname holds for this one segment. The resolver compares against
-// `url.pathname`, so a template's fixed text must already be in this form or it could never match.
-const canonicalSegment = (text: string) => new URL(`https://host/${text}`).pathname.slice(1)
+// A segment of a URL's pathname, percent-decoded: the one form every template segment is matched
+// against. Null when its escapes do not decode.
+function requestSegment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return null
+  }
+}
+
+// The text a request for `/${text}` is matched as: what a WHATWG URL makes of it, then decoded.
+const asRequested = (text: string) => requestSegment(new URL(`https://host/${text}`).pathname.slice(1))
 
 function parseSegment(text: string, row: EndpointRow): Segment {
   if (text === '') throw new Error(`endpoint ${row.id}: ${row.path} has an empty segment`)
   const segment = parseSegmentSyntax(text, row)
   // A param stands for at least one character, so `x` stands in for it here.
   const sample = segment.kind === 'literal' ? segment.text : `${segment.prefix}x${segment.suffix}`
-  if (canonicalSegment(sample) !== sample) {
-    throw new Error(`endpoint ${row.id}: segment ${text} of ${row.path} is not in the form a URL gives it`)
+  if (asRequested(sample) !== sample) {
+    throw new Error(`endpoint ${row.id}: segment ${text} of ${row.path} is not what a request for it is matched as`)
   }
   return segment
 }
@@ -260,37 +276,30 @@ function repeated(values: readonly string[]): string[] {
   return [...new Set(values.filter((value, i) => values.indexOf(value) !== i))]
 }
 
-// The value a request segment gives a param: the text between its prefix and suffix, percent-decoded.
-// Null when the segment is not one the param accepts, including one whose escapes do not decode.
-function paramValue(segment: ParamSegment, text: string): string | null {
-  const { prefix, suffix } = segment
-  if (text.length <= prefix.length + suffix.length || !text.startsWith(prefix) || !text.endsWith(suffix)) return null
-  try {
-    return decodeURIComponent(text.slice(prefix.length, text.length - suffix.length))
-  } catch {
-    return null
-  }
-}
-
+// [LAW:one-source-of-truth] The one matching rule, for the resolver and the overlap check alike,
+// applied to a decoded request segment.
 function segmentMatches(segment: Segment, text: string): boolean {
-  return segment.kind === 'literal' ? segment.text === text : paramValue(segment, text) !== null
+  switch (segment.kind) {
+    case 'literal':
+      return segment.text === text
+    case 'param':
+      return (
+        text.length > segment.prefix.length + segment.suffix.length &&
+        text.startsWith(segment.prefix) &&
+        text.endsWith(segment.suffix)
+      )
+  }
 }
 
-// Each param's value when every request segment matches its template segment, else null.
+// Each param's value, its prefix and suffix removed, when every request segment matches its template
+// segment; else null.
 function matchSegments(segments: readonly Segment[], texts: readonly string[]): Record<string, string> | null {
-  const params: Record<string, string> = {}
-  for (const [i, segment] of segments.entries()) {
-    // texts[i] is in range: the caller checked the lengths are equal.
-    const text = texts[i] as string
-    if (segment.kind === 'literal') {
-      if (segment.text !== text) return null
-      continue
-    }
-    const value = paramValue(segment, text)
-    if (value === null) return null
-    params[segment.name] = value
-  }
-  return params
+  const pairs = zip(segments, texts)
+  if (pairs === null || !pairs.every(([segment, text]) => segmentMatches(segment, text))) return null
+  const params = pairs.flatMap(([segment, text]) =>
+    segment.kind === 'param' ? [[segment.name, text.slice(segment.prefix.length, text.length - segment.suffix.length)]] : [],
+  )
+  return Object.fromEntries(params)
 }
 
 // Whether one request segment could match both. Two params share a match exactly when their prefixes
@@ -349,14 +358,19 @@ export type Resolution<R extends EndpointRow = Row> = R extends EndpointRow
   ? { readonly endpoint: Endpoint<R>; readonly params: Readonly<Record<ParamName<R['path']>, string>> }
   : never
 
+// The resolution of one row of the endpoint table, by id: what a generator for that row receives.
+export type ResolutionOf<Id extends EndpointId> = Resolution<Extract<Row, { id: Id }>>
+
 export function resolveEndpoint<R extends EndpointRow>(
   table: EndpointTable<R>,
   method: string,
   url: URL,
 ): Resolution<R> | null {
-  const texts = url.pathname.slice(1).split('/')
+  const texts = url.pathname.slice(1).split('/').map(requestSegment)
+  // A path with an escape that does not decode addresses no row.
+  if (!texts.every(text => text !== null)) return null
   for (const endpoint of table.endpoints) {
-    if (endpoint.host !== url.hostname || endpoint.method !== method || endpoint.segments.length !== texts.length) continue
+    if (endpoint.host !== url.hostname || endpoint.method !== method) continue
     const params = matchSegments(endpoint.segments, texts)
     // The params are exactly the {name}s parseTemplate read from this row's path, which are the names
     // ParamName reads from its type; this cast is the one place the two are joined.

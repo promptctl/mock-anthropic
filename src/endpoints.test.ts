@@ -7,6 +7,7 @@ import {
   ENDPOINT_TABLE,
   type EndpointRow,
   type InScopeId,
+  type ResolutionOf,
   resolveEndpoint,
 } from './endpoints.ts'
 
@@ -31,6 +32,7 @@ describe('resolveEndpoint over the endpoint table', () => {
     ['an archive name without its suffix', 'GET', '/claude-code-releases/plugins/claude-plugins-official/abc'],
     ['an archive name that is only its suffix', 'GET', '/claude-code-releases/plugins/claude-plugins-official/.zip'],
     ['a param whose escapes do not decode', 'GET', '/api/oauth/organizations/%E0/referral/eligibility'],
+    ['a literal whose escapes decode to other text', 'GET', `/api/oauth/organizations/${ORG}/referral/eligibility%2F`],
   ]
   for (const [name, method, path] of nearMisses) {
     test(`a near miss resolves to no endpoint: ${name}`, () => {
@@ -120,15 +122,19 @@ describe('resolveEndpoint over the endpoint table', () => {
     })
   })
 
-  test("a resolution's params are typed by its row's template", () => {
-    const table = buildEndpointTable([
-      { id: 'a', host: API, method: 'GET', path: '/x/{org}/{sha}.zip', scope: 'in-scope' } as const,
-    ])
-    const params = resolveEndpoint(table, 'GET', new URL(`https://${API}/x/o/s.zip`))?.params
-    const typed: { readonly org: string; readonly sha: string } | undefined = params
+  test('a literal matches the same text percent-encoded', () => {
+    expect(resolve(API, 'POST', '/v1/%6Dessages')?.id).toBe('messages')
+  })
+
+  test("a row's resolution types its params by the row's template", () => {
+    const params: ResolutionOf<'referral-eligibility'>['params'] = { org: ORG }
     // @ts-expect-error The template declares no {orgs}.
-    expect(params?.orgs).toBeUndefined()
-    expect(typed).toEqual({ org: 'o', sha: 's' })
+    expect(params.orgs).toBeUndefined()
+    const none: ResolutionOf<'messages'>['params'] = {}
+    // @ts-expect-error Messages declares no params.
+    expect(none.org).toBeUndefined()
+    const archive: ResolutionOf<'marketplace-archive'>['params'] = { sha: '3d3c42e' }
+    expect(resolution('downloads.claude.ai', 'GET', '/claude-code-releases/plugins/claude-plugins-official/3d3c42e.zip')?.params).toEqual(archive)
   })
 
   test('the query string, the port and the case of the host do not change the row', () => {
@@ -180,10 +186,11 @@ describe('buildEndpointTable', () => {
     ['a path without a leading slash', [row('a', 'x/y')], /endpoint a: x\/y does not start with \//],
     ['a host with capitals', [{ ...row('a', '/x'), host: 'API.anthropic.com' }], /endpoint a: host API\.anthropic\.com is not in/],
     ['a host with a port', [{ ...row('a', '/x'), host: `${API}:443` }], /endpoint a: host api\.anthropic\.com:443 is not in/],
-    ['a dot segment', [row('a', '/x/../y')], /endpoint a: segment \.\. of \/x\/\.\.\/y is not in the form a URL gives it/],
-    ['a literal with a space', [row('a', '/x y')], /endpoint a: segment x y of/],
+    ['a dot segment', [row('a', '/x/../y')], /endpoint a: segment \.\. of \/x\/\.\.\/y is not what a request for it is matched as/],
     ['a literal with a query', [row('a', '/x?y')], /endpoint a: segment x\?y of/],
-    ['fixed text around a param with a space', [row('a', '/x/{v} y')], /endpoint a: segment \{v\} y of/],
+    ['a literal with a bare percent', [row('a', '/x%')], /endpoint a: segment x% of/],
+    ['a literal written percent-encoded', [row('a', '/x%20y')], /endpoint a: segment x%20y of/],
+    ['fixed text around a param with a fragment', [row('a', '/x/{v}#y')], /endpoint a: segment \{v\}#y of/],
     ['a param name used twice', [row('a', '/x/{v}/y/{v}')], /endpoint a: \/x\/\{v\}\/y\/\{v\} names \{v\} twice/],
     [
       'a blank out-of-scope reason',
@@ -211,6 +218,7 @@ describe('buildEndpointTable', () => {
     ['two params whose suffixes disagree', [row('a', '/x/{n}.zip'), row('b', '/x/{n}.tar')]],
     ['two params whose prefixes disagree', [row('a', '/x/v{n}'), row('b', '/x/w{n}')]],
     ['templates of different lengths', [row('a', '/x/{v}'), row('b', '/x/{v}/y')]],
+    ['a literal with a space, which a request sends as %20', [row('a', '/x y')]],
   ]
   for (const [name, rows] of accepted) {
     test(`accepts ${name}`, () => {
