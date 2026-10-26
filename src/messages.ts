@@ -10,26 +10,27 @@ import { z } from 'zod'
 const TEXT = 'text'
 const TOOL_RESULT = 'tool_result'
 const READ_TYPES = new Set<string>([TEXT, TOOL_RESULT])
-const TextBlock = z.looseObject({ type: z.literal(TEXT), text: z.string() }).transform(block => [block.text])
+const TextBlock = z.object({ type: z.literal(TEXT), text: z.string() }).transform(block => [block.text])
 const OtherBlock = z
-  .looseObject({ type: z.string().refine(type => !READ_TYPES.has(type), 'is a block type read here, so must have its fields') })
+  .object({ type: z.string().refine(type => !READ_TYPES.has(type), 'is a block type read here, so must have its fields') })
   .transform((): string[] => [])
 const ToolResultContent = z.union([
   z.string().transform(text => [text]),
   z.array(z.union([TextBlock, OtherBlock])).transform(texts => texts.flat()),
 ])
 const ToolResultBlock = z
-  .looseObject({ type: z.literal(TOOL_RESULT), content: ToolResultContent.optional() })
+  .object({ type: z.literal(TOOL_RESULT), content: ToolResultContent.optional() })
   .transform(block => block.content ?? [])
 const Content = z.union([
   z.string().transform(text => [text]),
   z.array(z.union([TextBlock, ToolResultBlock, OtherBlock])).transform(texts => texts.flat()),
 ])
-const Message = z.looseObject({ role: z.enum(['user', 'assistant']), content: Content })
+const Message = z.object({ role: z.enum(['user', 'assistant']), content: Content })
 
-// Loose, because Claude Code sends many fields no part of the mock reads; a field that a generator
-// reads is added here, typed, so the body is still parsed once.
-const MessagesBody = z.looseObject({ messages: z.array(Message).min(1) }).transform((body, ctx) => {
+// Claude Code sends many fields no part of the mock reads, and zod drops keys a schema does not name,
+// so here and in every block above only what is read is declared. A field that a generator reads is
+// added here, typed, so the body is still parsed once.
+const MessagesBody = z.object({ messages: z.array(Message).min(1) }).transform((body, ctx) => {
   // [LAW:parse-dont-validate] The last user message is a parsed fact: a body with none is not a
   // request a script can be matched against, so it fails here and never reaches one.
   const lastUser = body.messages.findLast(message => message.role === 'user')

@@ -1,4 +1,5 @@
-import { lstat, readdir } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { type FileHandle, lstat, open, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { MessagesRequest } from './messages.ts'
@@ -25,7 +26,8 @@ const MessageReply = z
     kind: z.literal('message'),
     content: z.array(ContentBlock).min(1),
     stop_reason: z.enum(['end_turn', 'tool_use', 'max_tokens']),
-    eventDelayMs: z.int().nonnegative().default(0),
+    // A timer holds at most 2^31 - 1 ms and fires a longer delay after 1 ms, so a longer one is refused.
+    eventDelayMs: z.int().nonnegative().max(2 ** 31 - 1).default(0),
   })
   .refine(
     reply => reply.stop_reason === 'max_tokens' || (reply.stop_reason === 'tool_use') === reply.content.some(block => block.type === 'tool_use'),
@@ -45,6 +47,11 @@ const LiteralReply = z
       } catch (error) {
         ctx.issues.push({ code: 'custom', message: String(error), input: ctx.value })
       }
+      // Field names are case-insensitive (RFC 9110 5.1): two keys differing only in case are one field
+      // written twice, which Headers would join into one comma-separated value.
+      const names = Object.keys(ctx.value).map(name => name.toLowerCase())
+      const repeated = new Set(names.filter((name, index) => names.indexOf(name) !== index))
+      if (repeated.size > 0) ctx.issues.push({ code: 'custom', message: `names a field twice: ${[...repeated].join(', ')}`, input: ctx.value })
     }),
     body: z.string(),
   })
@@ -114,16 +121,9 @@ async function readDirectory(dir: string): Promise<Script[]> {
   return scripts.flat()
 }
 
-// A script removed after its directory was listed is not in the directory any more, so it reads as
-// none; a name that is still there and cannot be read, such as a dangling symlink, throws.
 async function readScript(path: string): Promise<Script[]> {
-  let text: string
-  try {
-    text = await Bun.file(path).text()
-  } catch (error) {
-    if (await removed(path)) return []
-    throw new Error(`script ${path}: cannot read: ${String(error)}`, { cause: error })
-  }
+  const text = await readRegularFile(path)
+  if (text === null) return []
   let value: unknown
   try {
     value = JSON.parse(text)
@@ -143,6 +143,30 @@ async function readScript(path: string): Promise<Script[]> {
           : null,
     },
   ]
+}
+
+// A script removed after its directory was listed is not in the directory any more, so it reads as
+// none (null); a name that is still there and cannot be read, such as a dangling symlink, throws.
+// [LAW:no-silent-failure] Opened without blocking and checked on the open handle, so a name that is
+// not a regular file throws instead of being read: a named pipe would hold the request open forever,
+// waiting for a writer. The check and the read are on one handle, so nothing can swap the file between.
+async function readRegularFile(path: string): Promise<string | null> {
+  const cannotRead = (error: unknown) => new Error(`script ${path}: cannot read: ${String(error)}`, { cause: error })
+  let handle: FileHandle
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK)
+  } catch (error) {
+    if (await removed(path)) return null
+    throw cannotRead(error)
+  }
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('not a regular file')
+    return await handle.readFile('utf8')
+  } catch (error) {
+    throw cannotRead(error)
+  } finally {
+    await handle.close()
+  }
 }
 
 async function removed(path: string): Promise<boolean> {

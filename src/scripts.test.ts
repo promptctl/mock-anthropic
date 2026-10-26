@@ -185,6 +185,11 @@ describe('a script that cannot be read fails loudly with its path', () => {
     'a status Response refuses': [{ reply: { kind: 'literal', status: 101, body: '' } }, 'at reply.status'],
     'a header name Headers refuses': [{ reply: { kind: 'literal', status: 429, headers: { 'retry after': '1' }, body: '' } }, 'Invalid header name'],
     'a header value Headers refuses': [{ reply: { kind: 'literal', status: 429, headers: { 'retry-after': '1\n2' }, body: '' } }, 'invalid value'],
+    'a delay no timer holds': [{ reply: { ...says('x').reply, eventDelayMs: 2 ** 31 } }, 'at reply.eventDelayMs'],
+    'one header named twice': [
+      { reply: { kind: 'literal', status: 429, headers: { 'Retry-After': '1', 'retry-after': '30' }, body: '' } },
+      'names a field twice: retry-after',
+    ],
     'a body on a 204': [{ reply: { kind: 'literal', status: 204, body: 'x' } }, 'at reply.body'],
     'tool input that is not an object': [
       { reply: { kind: 'message', content: [{ type: 'tool_use', name: 'Bash', input: 'ls' }], stop_reason: 'tool_use' } },
@@ -218,6 +223,13 @@ describe('a script that cannot be read fails loudly with its path', () => {
   test('a .json entry that is not a file', async () => {
     const dir = await directory()
     await mkdir(join(dir, 'sub.json'))
-    await expect(readScripts([dir])).rejects.toThrow(`script ${join(dir, 'sub.json')}: cannot read: `)
+    await expect(readScripts([dir])).rejects.toThrow(`script ${join(dir, 'sub.json')}: cannot read: Error: not a regular file`)
+  })
+
+  test('a named pipe, which would wait forever for a writer', async () => {
+    const dir = await directory()
+    const fifo = join(dir, 'pipe.json')
+    expect(Bun.spawnSync(['mkfifo', fifo]).exitCode).toBe(0)
+    await expect(readScripts([dir])).rejects.toThrow(`script ${fifo}: cannot read: Error: not a regular file`)
   })
 })
