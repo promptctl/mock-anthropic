@@ -27,7 +27,9 @@ function outOfScope<const Id extends string, const Path extends string>(
   return { id, host, method, path, scope: 'out-of-scope', reason } as const
 }
 
-const API = 'api.anthropic.com'
+// The host a request sent straight to the mock's port is addressed to (PROJECT.md "How a program
+// reaches it").
+export const API = 'api.anthropic.com'
 const PLATFORM = 'platform.claude.com'
 const CLAUDE_AI = 'claude.ai'
 const DOWNLOADS = 'downloads.claude.ai'
@@ -345,10 +347,11 @@ export function buildEndpointTable<R extends EndpointRow>(rows: readonly R[]): E
 
 export const ENDPOINT_TABLE: EndpointTable = buildEndpointTable(ROWS)
 
-// Every host the table knows, in table order, for the CONNECT allowlist and the certificate's host list.
-export const ENDPOINT_HOSTS: readonly string[] = Object.freeze([
-  ...new Set(ENDPOINT_TABLE.endpoints.map(endpoint => endpoint.host)),
-])
+// Every host a table knows, in table order: the hosts a server given that table accepts CONNECT for
+// and puts on its leaf certificate.
+export function tableHosts<R extends EndpointRow>(table: EndpointTable<R>): readonly string[] {
+  return [...new Set(table.endpoints.map(endpoint => endpoint.host))]
+}
 
 // The row a request is addressed to, and each of the row's params with the value its segment gave it,
 // percent-decoded and its prefix and suffix removed. One member per row, so a generator typed by its

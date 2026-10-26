@@ -3,12 +3,12 @@ import { join } from 'node:path'
 import { DEFAULT_ACCOUNT } from './account.ts'
 import {
   buildEndpointTable,
-  ENDPOINT_HOSTS,
   ENDPOINT_TABLE,
   type EndpointRow,
   type InScopeId,
   type ResolutionOf,
   resolveEndpoint,
+  tableHosts,
 } from './endpoints.ts'
 
 const API = 'api.anthropic.com'
@@ -150,7 +150,7 @@ describe('resolveEndpoint over the endpoint table', () => {
     const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
     const section = doc.split('\n## Hosts covered\n')[1]?.split('\n## ')[0] ?? ''
     const listed = [...section.matchAll(/^- `([^`]+)`/gm)].map(match => match[1])
-    expect(listed.toSorted()).toEqual([...ENDPOINT_HOSTS].toSorted())
+    expect(listed.toSorted()).toEqual([...tableHosts(ENDPOINT_TABLE)].toSorted())
   })
 
   test('the in-scope rows are exactly the ones listed above', () => {
