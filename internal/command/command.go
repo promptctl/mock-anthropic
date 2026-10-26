@@ -36,9 +36,10 @@ type Result struct {
 	Facts  Facts
 }
 
-// Kind is how a command ends. A task finishes by itself and never hears of a signal: one ends the
+// Kind is how a command ends. A task finishes by itself: a signal cancels its context and ends the
 // invocation at once, without waiting for it. A service runs until its context is cancelled and then
-// stops; while it stops, a second signal ends the invocation without it.
+// stops, returning a nil error for a clean stop; while it stops, a second signal ends the invocation
+// without it.
 type Kind int
 
 const (
@@ -179,6 +180,12 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	for {
 		select {
 		case sig := <-signals:
+			select {
+			case s := <-done: // the command finished before the signal could end it; its ending stands
+				done <- s
+				continue
+			default:
+			}
 			ends = append(ends, end{name: Signals[sig]})
 			cancel()
 			if cmd.Kind == Task || len(ends) > 1 {
