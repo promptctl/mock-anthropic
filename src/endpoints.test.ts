@@ -1,10 +1,20 @@
 import { describe, expect, test } from 'bun:test'
+import { join } from 'node:path'
 import { DEFAULT_ACCOUNT } from './account.ts'
-import { buildEndpointTable, ENDPOINT_TABLE, type EndpointRow, type InScopeId, resolveEndpoint } from './endpoints.ts'
+import {
+  buildEndpointTable,
+  ENDPOINT_HOSTS,
+  ENDPOINT_TABLE,
+  type EndpointRow,
+  type InScopeId,
+  resolveEndpoint,
+} from './endpoints.ts'
 
 const API = 'api.anthropic.com'
 const ORG = DEFAULT_ACCOUNT.organizationUuid
-const resolve = (host: string, method: string, path: string) => resolveEndpoint(ENDPOINT_TABLE, host, method, path)
+const resolution = (host: string, method: string, path: string) =>
+  resolveEndpoint(ENDPOINT_TABLE, method, new URL(`https://${host}${path}`))
+const resolve = (host: string, method: string, path: string) => resolution(host, method, path)?.endpoint ?? null
 
 describe('resolveEndpoint over the endpoint table', () => {
   test('a templated organization path resolves to its row', () => {
@@ -89,6 +99,29 @@ describe('resolveEndpoint over the endpoint table', () => {
     })
   }
 
+  test('each param captures its segment, without its prefix or suffix', () => {
+    expect(resolution(API, 'GET', `/api/oauth/organizations/${ORG}/referral/eligibility`)?.params).toEqual({ org: ORG })
+    const archive = '/claude-code-releases/plugins/claude-plugins-official/3d3c42e.zip'
+    expect(resolution('downloads.claude.ai', 'GET', archive)?.params).toEqual({ sha: '3d3c42e' })
+    expect(resolution(API, 'POST', '/v1/messages')?.params).toEqual({})
+  })
+
+  test('the query string, the port and the case of the host do not change the row', () => {
+    expect(resolve('API.Anthropic.com:443', 'POST', '/v1/messages?beta=true')?.id).toBe('messages')
+  })
+
+  test('the table is frozen, so no row can be added or changed after the overlap check', () => {
+    expect(Object.isFrozen(ENDPOINT_TABLE.endpoints)).toBe(true)
+    expect(ENDPOINT_TABLE.endpoints.every(e => Object.isFrozen(e) && Object.isFrozen(e.segments))).toBe(true)
+  })
+
+  test('PROJECT.md "Hosts covered" lists exactly the hosts the table knows', async () => {
+    const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
+    const section = doc.split('\n## Hosts covered\n')[1]?.split('\n## ')[0] ?? ''
+    const listed = [...section.matchAll(/^- `([^`]+)`/gm)].map(match => match[1])
+    expect(listed.toSorted()).toEqual([...ENDPOINT_HOSTS].toSorted())
+  })
+
   test('the in-scope rows are exactly the ones PROJECT.md names', () => {
     const declared = ENDPOINT_TABLE.endpoints.filter(endpoint => endpoint.scope === 'in-scope').map(e => e.id)
     expect(declared.toSorted()).toEqual(inScope.map(([id]) => id).toSorted())
@@ -111,7 +144,13 @@ describe('buildEndpointTable', () => {
     ['a param name outside [a-z_]', [row('a', '/x/{Org}')], /endpoint a: segment \{Org\} of/],
     ['an empty segment', [row('a', '/x//y')], /endpoint a: \/x\/\/y has an empty segment/],
     ['a path without a leading slash', [row('a', 'x/y')], /endpoint a: x\/y does not start with \//],
-    ['a duplicate id', [row('a', '/x'), row('a', '/y')], /duplicate endpoint id a/],
+    ['a param name used twice', [row('a', '/x/{v}/y/{v}')], /endpoint a: \/x\/\{v\}\/y\/\{v\} names \{v\} twice/],
+    [
+      'a blank out-of-scope reason',
+      [{ id: 'a', host: API, method: 'GET', path: '/x', scope: 'out-of-scope', reason: ' ' }],
+      /endpoint a: an out-of-scope row needs a reason/,
+    ],
+    ['a duplicate id, once however often it repeats', [row('a', '/x'), row('a', '/y'), row('a', '/z')], /^endpoint table:\nduplicate endpoint id a$/],
     ['a literal a param accepts', [row('a', '/x/latest'), row('b', '/x/{v}')], /endpoints a and b overlap/],
     ['two params that differ only by name', [row('a', '/x/{v}'), row('b', '/x/{w}')], /endpoints a and b overlap/],
     [

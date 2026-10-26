@@ -203,18 +203,35 @@ const PARAM_SEGMENT = /^([^{}]*)\{([a-z_]+)\}([^{}]*)$/
 
 function parseSegment(text: string, row: EndpointRow): Segment {
   if (text === '') throw new Error(`endpoint ${row.id}: ${row.path} has an empty segment`)
-  if (!/[{}]/.test(text)) return { kind: 'literal', text }
+  if (!/[{}]/.test(text)) return Object.freeze({ kind: 'literal', text })
   const match = PARAM_SEGMENT.exec(text)
   if (match === null) {
     throw new Error(`endpoint ${row.id}: segment ${text} of ${row.path} is not one {name} of [a-z_] with fixed text around it`)
   }
   const [, prefix = '', name = '', suffix = ''] = match
-  return { kind: 'param', name, prefix, suffix }
+  return Object.freeze({ kind: 'param', name, prefix, suffix })
 }
 
-function parseTemplate(row: EndpointRow): Segment[] {
+function parseTemplate(row: EndpointRow): readonly Segment[] {
   if (!row.path.startsWith('/')) throw new Error(`endpoint ${row.id}: ${row.path} does not start with /`)
-  return row.path.slice(1).split('/').map(text => parseSegment(text, row))
+  const segments = row.path.slice(1).split('/').map(text => parseSegment(text, row))
+  const names = segments.flatMap(segment => (segment.kind === 'param' ? [segment.name] : []))
+  for (const name of repeated(names)) throw new Error(`endpoint ${row.id}: ${row.path} names {${name}} twice`)
+  return Object.freeze(segments)
+}
+
+function parseEndpoint<R extends EndpointRow>(row: R): Endpoint<R> {
+  if (row.scope === 'out-of-scope' && !/\S/.test(row.reason)) {
+    throw new Error(`endpoint ${row.id}: an out-of-scope row needs a reason`)
+  }
+  const endpoint: Endpoint<R> = { ...row, segments: parseTemplate(row) }
+  Object.freeze(endpoint)
+  return endpoint
+}
+
+// Each value that occurs more than once, once.
+function repeated(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value, i) => values.indexOf(value) !== i))]
 }
 
 function segmentMatches(segment: Segment, text: string): boolean {
@@ -241,48 +258,69 @@ function segmentsOverlap(a: Segment, b: Segment): boolean {
   return prefixesAgree && suffixesAgree
 }
 
-// Whether two lists have the same length and every pair at one position satisfies `test`.
-function pairwise<A, B>(xs: readonly A[], ys: readonly B[], test: (x: A, y: B) => boolean): boolean {
-  return (
-    xs.length === ys.length &&
-    xs.every((x, i) => {
-      const y = ys[i]
-      return y !== undefined && test(x, y)
-    })
-  )
+// The pairs at each position of two lists of one length, or null when their lengths differ.
+function zip<A, B>(xs: readonly A[], ys: readonly B[]): (readonly [A, B])[] | null {
+  // ys[i] is in range: the lengths are equal.
+  return xs.length === ys.length ? xs.map((x, i) => [x, ys[i] as B] as const) : null
 }
 
 function overlap(a: Endpoint<EndpointRow>, b: Endpoint<EndpointRow>): boolean {
-  return a.host === b.host && a.method === b.method && pairwise(a.segments, b.segments, segmentsOverlap)
+  const pairs = zip(a.segments, b.segments)
+  return a.host === b.host && a.method === b.method && pairs !== null && pairs.every(([x, y]) => segmentsOverlap(x, y))
 }
 
-// [LAW:single-enforcer] The one checkpoint a table passes: every template parses, every id is unique,
-// and no request can match two rows, which is what lets the resolver return the first match it finds.
+// [LAW:single-enforcer] The one checkpoint a table passes: every row parses, every id is unique, and
+// no request can match two rows, which is what lets the resolver return the first match it finds.
+// Frozen, so nothing can add an overlapping row after the check.
 export function buildEndpointTable<R extends EndpointRow>(rows: readonly R[]): EndpointTable<R> {
-  const endpoints = rows.map(row => ({ ...row, segments: parseTemplate(row) }))
-  const problems = endpoints.flatMap((a, i) =>
-    endpoints.slice(i + 1).flatMap(b => [
-      ...(a.id === b.id ? [`duplicate endpoint id ${a.id}`] : []),
-      ...(overlap(a, b) ? [`endpoints ${a.id} and ${b.id} overlap: ${a.method} ${a.host} ${a.path} and ${b.path}`] : []),
-    ]),
-  )
+  const endpoints = Object.freeze(rows.map(parseEndpoint))
+  const problems = [
+    ...repeated(endpoints.map(endpoint => endpoint.id)).map(id => `duplicate endpoint id ${id}`),
+    ...endpoints.flatMap((a, i) =>
+      endpoints
+        .slice(i + 1)
+        .filter(b => overlap(a, b))
+        .map(b => `endpoints ${a.id} and ${b.id} overlap: ${a.method} ${a.host} ${a.path} and ${b.path}`),
+    ),
+  ]
   if (problems.length > 0) throw new Error(`endpoint table:\n${problems.join('\n')}`)
   // The brand is a type-level stamp with no runtime value; this cast is the one place it is applied.
-  return { endpoints } as unknown as EndpointTable<R>
+  return Object.freeze({ endpoints }) as unknown as EndpointTable<R>
 }
 
 export const ENDPOINT_TABLE: EndpointTable = buildEndpointTable(ROWS)
 
-// The row a request is addressed to, or null when no row is. `host` is a bare hostname and `path` has
-// no query string; normalizing either is the server's job at its boundary.
+// Every host the table knows, in table order: the CONNECT allowlist and the certificate's host list.
+export const ENDPOINT_HOSTS: readonly string[] = Object.freeze([
+  ...new Set(ENDPOINT_TABLE.endpoints.map(endpoint => endpoint.host)),
+])
+
+// The row a request is addressed to, and the segment each of the row's params matched, its prefix and
+// suffix removed. A URL's hostname is already lowercase with no port, and its pathname has no query.
+export type Resolution<R extends EndpointRow = Row> = {
+  readonly endpoint: Endpoint<R>
+  readonly params: Readonly<Record<string, string>>
+}
+
 export function resolveEndpoint<R extends EndpointRow>(
   table: EndpointTable<R>,
-  host: string,
   method: string,
-  path: string,
-): Endpoint<R> | null {
-  const segments = path.split('/').slice(1)
-  const matches = (endpoint: Endpoint<R>) =>
-    endpoint.host === host && endpoint.method === method && pairwise(endpoint.segments, segments, segmentMatches)
-  return table.endpoints.find(matches) ?? null
+  url: URL,
+): Resolution<R> | null {
+  const texts = url.pathname.slice(1).split('/')
+  for (const endpoint of table.endpoints) {
+    const pairs = zip(endpoint.segments, texts)
+    const matched =
+      endpoint.host === url.hostname &&
+      endpoint.method === method &&
+      pairs !== null &&
+      pairs.every(([segment, text]) => segmentMatches(segment, text))
+    if (matched) {
+      const params = pairs.flatMap(([segment, text]) =>
+        segment.kind === 'param' ? [[segment.name, text.slice(segment.prefix.length, text.length - segment.suffix.length)]] : [],
+      )
+      return { endpoint, params: Object.fromEntries(params) }
+    }
+  }
+  return null
 }
