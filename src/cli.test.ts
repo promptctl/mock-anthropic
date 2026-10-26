@@ -105,6 +105,7 @@ describe('serve', () => {
       argv: ['serve', '--port', '0'],
       outcome: 'ok',
       exit: 0,
+      duration_ms: expect.any(Number),
       facts: { port: mock.ready.port, ca: mock.ready.ca, account_file: null, scenarios: [], ended: 'SIGTERM' },
     })
     const { certificates } = stopped.record.facts as { certificates: Record<string, string> }
@@ -132,6 +133,25 @@ describe('serve', () => {
     expect(stopped.record).toMatchObject({ outcome: 'ok', facts: { account_file: accountFile, scenarios: [first, second] } })
   })
 
+  test('an error nobody caught stops it and fails the run, keeping what it learned', async () => {
+    // reportError is how a failing sink reports (server.ts); it lands while serve starts or runs, and
+    // either way serve stops on it.
+    const script = join(await directory(), 'crash.ts')
+    await Bun.write(
+      script,
+      `import { main } from ${JSON.stringify(COMMAND)}
+import { COMMANDS } from ${JSON.stringify(CLI)}
+setTimeout(() => reportError(new Error('nobody caught this')), 0)
+process.exitCode = await main(COMMANDS, ['serve', '--port', '0'])
+`,
+    )
+    const child = spawn([script])
+    const result = await finished(child, new Response(child.stdout).text())
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: { account_file: null, ended: 'crashed' } })
+    expect(result.record.why).toContain('nobody caught this')
+  })
+
   test('a port it cannot listen on fails the start: exit 1, a FAILED record, nothing on stdout', async () => {
     const holder = net.createServer()
     await new Promise<void>(resolve => holder.listen(0, '127.0.0.1', resolve))
@@ -157,6 +177,8 @@ describe('a wrong command line', () => {
     ['a port out of range', ['serve', '--port', '70000'], '"70000"'],
     ['a missing account file', ['serve', '--account', '/nonexistent/account.json'], '/nonexistent/account.json'],
     ['a missing scripts directory', ['serve', '--scenarios', '/nonexistent/scripts'], '/nonexistent/scripts'],
+    ['an empty scripts directory path', ['serve', '--scenarios', ''], '--scenarios: an empty path'],
+    ['an empty account file path', ['serve', '--account', ''], '--account: an empty path'],
   ]
   for (const [what, args, named] of cases) {
     test(`${what}: exit 2, a USAGE record naming the cause, nothing on stdout`, async () => {
@@ -217,7 +239,7 @@ describe('the dispatcher', () => {
           `${raise}
 const reason = await ended
 await Bun.write(marker, 'yes')
-return { outcome: 'ok', facts: { ended: 'crashed' in reason ? 'crashed' : reason.signal } }`,
+return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.signal } }`,
         )
       ).finished()
       expect(result.exit).toBe(1)
@@ -252,7 +274,29 @@ return { outcome: 'ok', facts: { ended: 'crashed' in reason ? 'crashed' : reason
     running.signal('SIGINT')
     const result = await running.finished()
     expect(result.exit).toBe(1)
-    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGINT before the command finished\nSIGINT before the command finished' })
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGINT before the command finished\nSIGINT while the command was ending' })
+  })
+
+  test('the record of an abandoned command reaches a reader that is behind on stderr', async () => {
+    // The task writes a MiB of stderr, then signals itself. Its stderr is a pipe a shell reads only after
+    // a pause, so when the dispatcher exits Bun still holds most of that MiB, and the record behind it.
+    const script = join(await directory(), 'behind.ts')
+    await Bun.write(
+      script,
+      `import { main } from ${JSON.stringify(COMMAND)}
+const run = async () => {
+  process.stderr.write('x'.repeat(1 << 20) + '\\n')
+  process.kill(process.pid, 'SIGTERM')
+  return new Promise(() => {})
+}
+process.exitCode = await main({ stand_in: { kind: 'task', usage: '', run } }, ['stand_in'])
+`,
+    )
+    const child = Bun.spawn(['sh', '-c', 'bun "$0" 2>&1 >/dev/null | { sleep 0.5; cat; }', script], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
+    children.add(child)
+    const last = (await new Response(child.stdout).text()).trimEnd().split('\n').at(-1) ?? ''
+    expect(last.slice(0, 'FAILED '.length)).toBe('FAILED ')
+    expect(JSON.parse(last.slice('FAILED '.length))).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGTERM before the command finished' })
   })
 
   test("a child's exit code is the run's", async () => {

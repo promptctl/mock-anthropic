@@ -46,3 +46,10 @@ export function exitCode(ending: Ending): number {
 export function eventLine(event: ServerEvent | CommandEvent): string {
   return `${event.outcome.toUpperCase()} ${JSON.stringify(event)}`
 }
+
+// [LAW:single-enforcer] The one writer of records to stderr. It resolves once the line has left the
+// process, so an exit after it cannot drop it; a write that fails is reported by the stream's own
+// error event.
+export function writeRecord(event: ServerEvent | CommandEvent): Promise<void> {
+  return new Promise(resolve => process.stderr.write(`${eventLine(event)}\n`, () => resolve()))
+}

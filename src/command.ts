@@ -1,12 +1,12 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util'
 import type { Facts } from './dispatch.ts'
-import { type CommandEvent, type CommandResult, type Ending, eventLine, exitCode } from './log.ts'
+import { type CommandEvent, type CommandResult, type Ending, exitCode, writeRecord } from './log.ts'
 
 // PROJECT.md "Commands": the dispatcher every command runs under. It owns what a command does not: the
 // invocation's lifetime, its one record, and its exit code.
 
-// Why an invocation was asked to end: a signal, or errors raised outside any command's call chain.
-export type EndReason = { readonly signal: Signal } | { readonly crashed: readonly unknown[] }
+// Why an invocation was asked to end: a signal, or an error raised outside any command's call chain.
+export type EndReason = { readonly signal: Signal } | { readonly crash: unknown }
 
 type Signal = 'SIGINT' | 'SIGTERM'
 
@@ -43,11 +43,11 @@ export async function main(commands: Commands, argv: readonly string[]): Promise
   const started = performance.now()
   const { ending, abandoned } = await invoke(commands, argv)
   const event: CommandEvent = { event: 'command', argv, duration_ms: Math.round(performance.now() - started), exit: exitCode(ending), ...ending }
-  process.stderr.write(`${eventLine(event)}\n`)
-  // A command that was not waited for is still running, and nothing else will stop it. Otherwise the
-  // process ends by itself: process.exit drops piped output Bun has not yet written (Bun 1.3.14 holds
-  // it past the pipe's 64 KiB with writableLength 0), so it is kept for the run whose output is cut
-  // short anyway.
+  await writeRecord(event)
+  // A command that was not waited for is still running, and nothing else will stop it; its record has
+  // left the process, so exiting cannot drop it. Otherwise the process ends by itself: process.exit
+  // drops piped output Bun has not yet written (Bun 1.3.14 holds it past the pipe's 64 KiB with
+  // writableLength 0), so it is kept for the run whose output is cut short anyway.
   if (abandoned) process.exit(event.exit)
   return event.exit
 }
@@ -68,24 +68,33 @@ async function invoke(commands: Commands, argv: readonly string[]): Promise<Invo
       ),
       lifetime.forced.then(() => ({ kind: 'abandoned' }) as const),
     ])
-    // Errors nobody caught outrank whatever the command did after them: they are why it ended.
-    const crashed = lifetime.crashed()
+    // Errors nobody caught outrank whatever the command did after them: they are why it ended. A failed
+    // record tells every end, in order.
+    const why = lifetime.ends.map(told)
+    const crashed = lifetime.ends.some(reason => 'crash' in reason)
     switch (settled.kind) {
       case 'abandoned':
-        return { ending: failed(crashed, lifetime.signals().map(signal => `${signal} before the command finished`), {}), abandoned: true }
+        return { ending: failed(why, {}), abandoned: true }
       case 'returned':
-        return { ending: crashed.length === 0 ? settled.result : failed(crashed, [], settled.result.facts), abandoned: false }
+        return { ending: crashed ? failed(why, settled.result.facts) : settled.result, abandoned: false }
       case 'threw':
-        if (crashed.length === 0 && settled.error instanceof UsageError) return { ending: usage(commands, settled.error.message), abandoned: false }
-        return { ending: failed([...crashed, settled.error], [], {}), abandoned: false }
+        if (!crashed && settled.error instanceof UsageError) return { ending: usage(commands, settled.error.message), abandoned: false }
+        return { ending: failed([...why, describe(settled.error)], {}), abandoned: false }
     }
   } finally {
     lifetime.close()
   }
 }
 
-function failed(errors: readonly unknown[], notes: readonly string[], facts: Facts): Ending {
-  return { outcome: 'failed', why: [...errors.map(describe), ...notes].join('\n'), facts }
+function failed(why: readonly string[], facts: Facts): Ending {
+  return { outcome: 'failed', why: why.join('\n'), facts }
+}
+
+// The first end asked the command to finish; a signal after it came while the command was ending, and
+// is what abandons a service.
+function told(reason: EndReason, index: number): string {
+  if ('crash' in reason) return describe(reason.crash)
+  return `${reason.signal} ${index === 0 ? 'before the command finished' : 'while the command was ending'}`
 }
 
 function usage(commands: Commands, why: string): Ending {
@@ -98,11 +107,10 @@ function usage(commands: Commands, why: string): Ending {
 // each error nobody caught (a sink's failure is reported with reportError, server.ts), is an end: the
 // first resolves `ended`. `forced` resolves when the command can no longer be waited for: at the first
 // end for a task, which never hears one, and at a signal after the first end for a service, which is
-// stopping. Every end is kept for the record, and the listeners last exactly as long as the command.
+// stopping. Every end is kept, in order, for the record, and the listeners last exactly as long as the
+// command.
 function watch(kind: Command['kind']) {
-  const crashes: unknown[] = []
-  const signals: Signal[] = []
-  let ends = 0
+  const ends: EndReason[] = []
   let end!: (reason: EndReason) => void
   let force!: () => void
   const ended = new Promise<EndReason>(resolve => {
@@ -112,20 +120,13 @@ function watch(kind: Command['kind']) {
     force = resolve
   })
   const onEnd = (reason: EndReason) => {
-    ends += 1
+    ends.push(reason)
     end(reason)
-    if (kind === 'task' || ('signal' in reason && ends > 1)) force()
+    if (kind === 'task' || ('signal' in reason && ends.length > 1)) force()
   }
-  const onSignal = (signal: Signal) => {
-    signals.push(signal)
-    onEnd({ signal })
-  }
-  const onInterrupt = () => onSignal('SIGINT')
-  const onTerminate = () => onSignal('SIGTERM')
-  const onCrash = (error: unknown) => {
-    crashes.push(error)
-    onEnd({ crashed: crashes })
-  }
+  const onInterrupt = () => onEnd({ signal: 'SIGINT' })
+  const onTerminate = () => onEnd({ signal: 'SIGTERM' })
+  const onCrash = (crash: unknown) => onEnd({ crash })
   process.on('SIGINT', onInterrupt)
   process.on('SIGTERM', onTerminate)
   process.on('uncaughtException', onCrash)
@@ -133,8 +134,7 @@ function watch(kind: Command['kind']) {
   return {
     ended,
     forced,
-    crashed: (): readonly unknown[] => crashes,
-    signals: (): readonly Signal[] => signals,
+    ends: ends as readonly EndReason[],
     close() {
       process.off('SIGINT', onInterrupt)
       process.off('SIGTERM', onTerminate)
