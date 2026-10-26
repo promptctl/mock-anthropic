@@ -10,9 +10,10 @@ test('zod is the only runtime dependency', () => {
   expect(runtime).toEqual(['zod'])
 })
 
-// [LAW:one-source-of-truth] `packageManager` pins the Bun that CI runs; @types/bun describes that
-// runtime's API to the typecheck, so it must name the same version or the typecheck checks
-// against a Bun nobody runs.
-test('@types/bun matches the pinned Bun', () => {
+// [LAW:one-source-of-truth] `packageManager` pins Bun. The running Bun must be that one: setup-bun
+// only warns and installs the latest Bun when it cannot read the pin. @types/bun describes that
+// runtime's API to the typecheck, so it must name the same version.
+test('the running Bun and @types/bun match the pinned Bun', () => {
+  expect(`bun@${Bun.version}`).toBe(pkg.packageManager)
   expect(`bun@${pkg.devDependencies['@types/bun']}`).toBe(pkg.packageManager)
 })
