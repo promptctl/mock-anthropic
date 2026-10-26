@@ -103,8 +103,10 @@ async function present(path: string): Promise<boolean> {
   )
 }
 
-// Every file is written whole beside its target before any is renamed over one, so a write that fails
-// replaces nothing, and a Claude Code reading the directory never sees half a file. A replaced file
+// Every file is written whole beside its target before any is renamed over one, so a failed write
+// replaces nothing (a failed rename can leave an earlier file replaced: the login fails, and the next
+// replaces both), and a Claude Code reading the directory never sees half a file. One at a time, so
+// no write is still running when the `finally` removes its temporary. A replaced file
 // takes the mode (an in-place write keeps the old file's): 0600, as Claude Code writes both files
 // itself (utils/config.ts:1139, plainTextStorage.ts:61).
 async function writeWhole(dir: string, files: readonly LoginFile[]): Promise<readonly (readonly [LoginFile['name'], 'created' | 'replaced'])[]> {
