@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises'
+import { lstat, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { MessagesRequest } from './messages.ts'
@@ -31,20 +31,35 @@ const MessageReply = z
     reply => reply.stop_reason === 'max_tokens' || (reply.stop_reason === 'tool_use') === reply.content.some(block => block.type === 'tool_use'),
     { message: 'stop_reason "tool_use" needs a tool_use block, and "end_turn" allows none', path: ['stop_reason'] },
   )
-const LiteralReply = z.strictObject({
-  kind: z.literal('literal'),
-  status: z.int().min(200).max(599),
-  headers: z.record(z.string(), z.string()).default({}),
-  body: z.string(),
-})
+// [LAW:parse-dont-validate] A literal reply is one a Response can carry, checked when the script is
+// read so the error names the script: the Fetch standard's own Headers check, and an empty body on a
+// status that has none (RFC 9110 15.3.5, 15.3.6, 15.4.5).
+const NULL_BODY_STATUSES = new Set([204, 205, 304])
+const LiteralReply = z
+  .strictObject({
+    kind: z.literal('literal'),
+    status: z.int().min(200).max(599),
+    headers: z.record(z.string(), z.string()).default({}).check(ctx => {
+      try {
+        new Headers(ctx.value)
+      } catch (error) {
+        ctx.issues.push({ code: 'custom', message: String(error), input: ctx.value })
+      }
+    }),
+    body: z.string(),
+  })
+  .refine(reply => reply.body === '' || !NULL_BODY_STATUSES.has(reply.status), {
+    message: 'a 204, 205 or 304 has no body',
+    path: ['body'],
+  })
 const ReplySchema = z.discriminatedUnion('kind', [MessageReply, LiteralReply])
 
 export type Reply = z.output<typeof ReplySchema>
 export type MessageReply = Extract<Reply, { kind: 'message' }>
 export type LiteralReply = Extract<Reply, { kind: 'literal' }>
 
-// Every needle must appear: `bodyContains` anywhere in the raw body, `lastUserContains` in the last
-// user message's text. An empty needle would match everything, so it is refused; a script with no
+// Every needle must appear: `bodyContains` anywhere in the raw body (the JSON text as sent, so a
+// needle can name a field), `lastUserContains` within one of the last user message's texts. An empty needle would match everything, so it is refused; a script with no
 // needles answers every Messages request.
 const Needles = z.array(z.string().min(1)).default([])
 const ScriptFile = z.strictObject({
@@ -80,8 +95,9 @@ export async function selectReply(dirs: readonly string[], builtIns: readonly Sc
 const SCRIPT_SUFFIX = '.json'
 
 // [LAW:effects-at-boundaries] The one read of the consumer's directories: each directory's `.json`
-// entries in code-unit order of their names, which no locale changes. Any other name is not a script,
-// so a consumer that writes `x.json.tmp` and renames it never has a half-written script read.
+// entries in code-unit order of their names, which no locale changes. A hidden name (an editor's lock
+// file, macOS's `._` metadata) or any other suffix is not a script, so a consumer that writes
+// `x.json.tmp` and renames it never has a half-written script read.
 // [LAW:no-silent-failure] An unreadable directory or file, or a file that is not a script, throws
 // with its path; the generator's caller turns that into a 500 and a FAILED line.
 export async function readScripts(dirs: readonly string[]): Promise<Script[]> {
@@ -93,14 +109,21 @@ async function readDirectory(dir: string): Promise<Script[]> {
   const names = await readdir(dir).catch((error: unknown) => {
     throw new Error(`scripts directory ${dir}: cannot read: ${String(error)}`, { cause: error })
   })
-  const paths = names.filter(name => name.endsWith(SCRIPT_SUFFIX)).sort().map(name => join(dir, name))
-  return Promise.all(paths.map(readScript))
+  const paths = names.filter(name => name.endsWith(SCRIPT_SUFFIX) && !name.startsWith('.')).sort().map(name => join(dir, name))
+  const scripts = await Promise.all(paths.map(readScript))
+  return scripts.flat()
 }
 
-async function readScript(path: string): Promise<Script> {
-  const text = await Bun.file(path).text().catch((error: unknown) => {
+// A script removed after its directory was listed is not in the directory any more, so it reads as
+// none; a name that is still there and cannot be read, such as a dangling symlink, throws.
+async function readScript(path: string): Promise<Script[]> {
+  let text: string
+  try {
+    text = await Bun.file(path).text()
+  } catch (error) {
+    if (await removed(path)) return []
     throw new Error(`script ${path}: cannot read: ${String(error)}`, { cause: error })
-  })
+  }
   let value: unknown
   try {
     value = JSON.parse(text)
@@ -110,12 +133,21 @@ async function readScript(path: string): Promise<Script> {
   const result = ScriptFile.safeParse(value)
   if (!result.success) throw new Error(`script ${path}: ${z.prettifyError(result.error)}`)
   const { match, reply } = result.data
-  return {
-    origin: path,
-    reply: request =>
-      match.bodyContains.every(needle => request.raw.includes(needle)) &&
-      match.lastUserContains.every(needle => request.lastUserText.includes(needle))
-        ? reply
-        : null,
-  }
+  return [
+    {
+      origin: path,
+      reply: request =>
+        match.bodyContains.every(needle => request.raw.includes(needle)) &&
+        match.lastUserContains.every(needle => request.lastUserTexts.some(text => text.includes(needle)))
+          ? reply
+          : null,
+    },
+  ]
+}
+
+async function removed(path: string): Promise<boolean> {
+  return lstat(path).then(
+    () => false,
+    (error: NodeJS.ErrnoException) => error.code === 'ENOENT',
+  )
 }

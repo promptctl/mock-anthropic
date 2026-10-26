@@ -3,12 +3,14 @@ import { z } from 'zod'
 // PROJECT.md "Messages": the one reading of a `POST /v1/messages` body. Every part of the mock that
 // answers a Messages request reads the body through this parse, never on its own.
 
-// A content block parses to the text a script can match in it [LAW:types-are-the-program]: a `text`
+// A content block parses to the texts a script can match in it [LAW:types-are-the-program]: a `text`
 // block's text, a `tool_result` block's content, and nothing from any other block, so ids, `type`
 // values and image data are never matchable. A block of a type read here that is malformed fails the
 // parse rather than passing as some other block.
-const READ_TYPES = new Set(['text', 'tool_result'])
-const TextBlock = z.looseObject({ type: z.literal('text'), text: z.string() }).transform(block => [block.text])
+const TEXT = 'text'
+const TOOL_RESULT = 'tool_result'
+const READ_TYPES = new Set<string>([TEXT, TOOL_RESULT])
+const TextBlock = z.looseObject({ type: z.literal(TEXT), text: z.string() }).transform(block => [block.text])
 const OtherBlock = z
   .looseObject({ type: z.string().refine(type => !READ_TYPES.has(type), 'is a block type read here, so must have its fields') })
   .transform((): string[] => [])
@@ -17,7 +19,7 @@ const ToolResultContent = z.union([
   z.array(z.union([TextBlock, OtherBlock])).transform(texts => texts.flat()),
 ])
 const ToolResultBlock = z
-  .looseObject({ type: z.literal('tool_result'), content: ToolResultContent.optional() })
+  .looseObject({ type: z.literal(TOOL_RESULT), content: ToolResultContent.optional() })
   .transform(block => block.content ?? [])
 const Content = z.union([
   z.string().transform(text => [text]),
@@ -35,10 +37,10 @@ const MessagesBody = z.looseObject({ messages: z.array(Message).min(1) }).transf
     ctx.addIssue({ code: 'custom', message: 'has no user message', path: ['messages'] })
     return z.NEVER
   }
-  return { lastUserText: lastUser.content.join('\n') }
+  return { lastUserTexts: lastUser.content }
 })
 
-// `raw` is the body as sent, for matching anywhere in it; `lastUserText` is the text of the last
+// `raw` is the body as sent, for matching anywhere in it; `lastUserTexts` are the texts of the last
 // `user` message, the current turn, apart from the same words earlier in the conversation.
 export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
 

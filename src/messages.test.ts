@@ -26,7 +26,7 @@ describe('parseMessagesRequest', () => {
     }
     const request = parsed(body)
     expect(request.raw).toBe(JSON.stringify(body))
-    expect(request.lastUserText).toBe('hello')
+    expect(request.lastUserTexts).toEqual(['hello'])
   })
 
   test('the last user text is the last user message, not an earlier one or a later assistant turn', () => {
@@ -38,10 +38,10 @@ describe('parseMessagesRequest', () => {
         { role: 'assistant', content: 'prefill' },
       ],
     })
-    expect(request.lastUserText).toBe('second question')
+    expect(request.lastUserTexts).toEqual(['second question'])
   })
 
-  test('the text of a message is its text blocks and its tool results, by block type', () => {
+  test('the texts of a message are its text blocks and its tool results, by block type', () => {
     const request = parsed({
       messages: [
         {
@@ -56,7 +56,7 @@ describe('parseMessagesRequest', () => {
         },
       ],
     })
-    expect(request.lastUserText).toBe('string result\nblock result\ntyped text')
+    expect(request.lastUserTexts).toEqual(['string result', 'block result', 'typed text'])
   })
 
   test('a body that is not a Messages request is invalid, with the reason', () => {

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
@@ -72,8 +72,10 @@ describe('order', () => {
     expect(matched(await selectReply([dir], [EVERYTHING], HELLO)).origin).toBe('built-in: everything')
   })
 
-  test('only .json entries are scripts', async () => {
-    const dir = await directory({ 'notes.txt': 'not a script', 'half.json.tmp': '{"match":', 'a.json': says('a') })
+  test('only .json entries that are not hidden are scripts', async () => {
+    const dir = await directory({ 'notes.txt': 'not a script', 'half.json.tmp': '{"match":', '._a.json': '\u0000\u0005', 'a.json': says('a') })
+    // An editor's lock file: a dangling symlink beside the file it locks.
+    await symlink('user@host.1234', join(dir, '.#a.json'))
     expect((await readScripts([dir])).map(script => script.origin)).toEqual([join(dir, 'a.json')])
   })
 })
@@ -111,6 +113,12 @@ describe('matching', () => {
       'c.json': says('result', { lastUserContains: ['12 pass'] }),
     })
     expect(textOf(await selectReply([dir], [], earlier))).toBe('result')
+  })
+
+  test('a lastUserContains needle must fall within one text, not across two', async () => {
+    const two = request({ role: 'user', content: [{ type: 'text', text: 'build ok' }, { type: 'text', text: 'deploy' }] })
+    const dir = await directory({ 'a.json': says('across', { lastUserContains: ['ok\ndeploy'] }), 'b.json': says('each', { lastUserContains: ['ok', 'deploy'] }) })
+    expect(textOf(await selectReply([dir], [], two))).toBe('each')
   })
 
   test('every needle must appear', async () => {
@@ -175,6 +183,9 @@ describe('a script that cannot be read fails loudly with its path', () => {
     ],
     'tool_use with no tool call': [{ reply: { kind: 'message', content: [{ type: 'text', text: 'x' }], stop_reason: 'tool_use' } }, 'at reply.stop_reason'],
     'a status Response refuses': [{ reply: { kind: 'literal', status: 101, body: '' } }, 'at reply.status'],
+    'a header name Headers refuses': [{ reply: { kind: 'literal', status: 429, headers: { 'retry after': '1' }, body: '' } }, 'Invalid header name'],
+    'a header value Headers refuses': [{ reply: { kind: 'literal', status: 429, headers: { 'retry-after': '1\n2' }, body: '' } }, 'invalid value'],
+    'a body on a 204': [{ reply: { kind: 'literal', status: 204, body: 'x' } }, 'at reply.body'],
     'tool input that is not an object': [
       { reply: { kind: 'message', content: [{ type: 'tool_use', name: 'Bash', input: 'ls' }], stop_reason: 'tool_use' } },
       'at reply.content[0].input',
@@ -196,6 +207,12 @@ describe('a script that cannot be read fails loudly with its path', () => {
   test('a scripts directory that does not exist', async () => {
     const missing = join(root, 'missing')
     await expect(readScripts([missing])).rejects.toThrow(`scripts directory ${missing}: cannot read: `)
+  })
+
+  test('a script name that is still there and cannot be read', async () => {
+    const dir = await directory()
+    await symlink(join(dir, 'nowhere'), join(dir, 'dangling.json'))
+    await expect(readScripts([dir])).rejects.toThrow(`script ${join(dir, 'dangling.json')}: cannot read: `)
   })
 
   test('a .json entry that is not a file', async () => {
