@@ -82,7 +82,7 @@ const ANSWERS: readonly { name: string; method: Method; url: string; body?: stri
       account: { uuid: ACCOUNT_UUID, email_address: 'override@mock-anthropic.invalid' },
       organization: { uuid: ORG_UUID, name: 'Override Organization' },
     },
-    facts: { ...IDENTITY, grant_type: 'refresh_token' },
+    facts: { ...IDENTITY, grant_type: 'refresh_token', mock_refresh_token: true },
   },
   {
     name: 'CLI bootstrap',
@@ -174,21 +174,26 @@ describe('an organization-scoped path naming another organization', () => {
 describe('a token request that is not a refresh of the mock login', () => {
   const token = (body: string) => send('POST', 'https://platform.claude.com/v1/oauth/token', body)
 
-  test('another grant is declined as the browser login flow', async () => {
-    const { verdict, response } = await token(JSON.stringify({ grant_type: 'authorization_code', code: 'x', refresh_token: 'mock-anthropic-refresh-token' }))
+  test('another grant is declined as the browser login flow, and its facts name the grant', async () => {
+    const { verdict, response, facts } = await token(JSON.stringify({ grant_type: 'authorization_code', code: 'x' }))
     expect(response.status).toBe(400)
-    expect(verdict).toMatchObject({ outcome: 'unmatched', why: expect.stringContaining('the browser login flow is out of scope') })
+    expect(verdict).toEqual({ outcome: 'unmatched', why: 'grant_type authorization_code: the browser login flow is out of scope' })
+    expect(facts).toEqual({ grant_type: 'authorization_code', mock_refresh_token: false })
   })
 
-  // A real login that reached the mock would have its stored credential replaced by the mock's.
-  test('another refresh token is declined, never exchanged for the mock token', async () => {
-    const { verdict, response } = await token(JSON.stringify({ grant_type: 'refresh_token', refresh_token: 'a-real-refresh-token' }))
+  // A real login that reached the mock would have its stored credential replaced by the mock's, so it
+  // is refused, and its token stays out of the record.
+  test('another refresh token is declined, never exchanged for the mock token or recorded', async () => {
+    const { verdict, response, facts } = await token(JSON.stringify({ grant_type: 'refresh_token', refresh_token: 'a-real-refresh-token' }))
     expect(response.status).toBe(400)
-    expect(verdict).toMatchObject({ outcome: 'unmatched', why: expect.stringContaining('a login the mock did not write reached it') })
+    expect(verdict).toEqual({ outcome: 'unmatched', why: "the refresh token is not the mock's: a login the mock did not write reached it" })
+    expect(facts).toEqual({ grant_type: 'refresh_token', mock_refresh_token: false })
+    expect(await response.text()).not.toContain('a-real-refresh-token')
   })
 
   test('a body that is not JSON is declined, saying so', async () => {
-    const { verdict } = await token('grant_type=refresh_token')
+    const { verdict, facts } = await token('grant_type=refresh_token')
     expect(verdict).toMatchObject({ outcome: 'unmatched', why: expect.stringMatching(/^body is not JSON/) })
+    expect(facts).toEqual({})
   })
 })

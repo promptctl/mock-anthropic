@@ -8,7 +8,7 @@ const REQUIRED = { model: MODEL, max_tokens: 1024 }
 function parsed(body: unknown): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify(body))
   if (result.kind !== 'parsed') throw new Error(`expected a Messages request: ${result.why}`)
-  return result.request
+  return result.value
 }
 
 function invalid(raw: string): string {

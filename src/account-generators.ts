@@ -39,13 +39,43 @@ function forOrganization(account: Account, org: string, body: Json): Answer {
       }
 }
 
-// A refresh of the login `login` writes. Another grant is the browser login flow. Another refresh token
-// is a login the mock did not write: answering it would overwrite that login's stored credential with
-// the mock's.
-const RefreshRequest = z.object({
-  grant_type: z.literal('refresh_token', { error: 'must be refresh_token: the browser login flow is out of scope' }),
-  refresh_token: z.literal(REFRESH_TOKEN, { error: "must be the mock's refresh token: a login the mock did not write reached it" }),
-})
+// [LAW:types-are-the-program] The in-scope rows whose path names an organization. They are given
+// bodies, never generators, so no answer to one can skip forOrganization.
+type OrganizationRow = Extract<Row, { scope: 'in-scope'; path: `${string}{org}${string}` }>
+type OrganizationBodies = { readonly [Id in OrganizationRow['id']]?: Json }
+
+export function organizationGenerators(account: Account): Generators<OrganizationRow> {
+  const bodies: OrganizationBodies = {
+    'organization-skills': { skills: [] },
+    // No `cc` selector config, so 2.1.289 caches no model catalog and offers its own models.
+    'model-selector': { organization_uuid: account.organizationUuid },
+    'organization-marketplaces': { marketplaces: [] },
+    // 2.1.289 asks for the next page while `has_more` is true.
+    'organization-plugins': { plugins: [], has_more: false },
+  }
+  const generators = Object.entries(bodies).map(([id, body]) => [
+    id,
+    ({ params }: { readonly params: { readonly org: string } }) => forOrganization(account, params.org, body),
+  ])
+  // Every key is an OrganizationRow id, and every such row has an `{org}` param, which
+  // Object.fromEntries cannot carry; this cast is the one place that says so.
+  return Object.fromEntries(generators) as Generators<OrganizationRow>
+}
+
+// What a token request asks for, read loosely so that a refusal can say what was asked.
+const TokenRequest = z.object({ grant_type: z.string(), refresh_token: z.string().optional() })
+
+// A refresh of the login `login` writes is answered. Another grant is the browser login flow. Another
+// refresh token is a login the mock did not write: answering it would overwrite that login's stored
+// credential with the mock's.
+function refusal(grant_type: string, mockRefreshToken: boolean): string | null {
+  if (grant_type !== 'refresh_token') return `grant_type ${grant_type}: the browser login flow is out of scope`
+  return mockRefreshToken ? null : "the refresh token is not the mock's: a login the mock did not write reached it"
+}
+
+// The rows answered here: neither an organization-scoped row nor Messages can be given a generator in
+// this map, so none can skip forOrganization or stand in for the Messages generator.
+type AccountRow = Exclude<Row, OrganizationRow | Extract<Row, { id: 'messages' }>>
 
 export function accountGenerators(account: Account) {
   return {
@@ -80,8 +110,13 @@ export function accountGenerators(account: Account) {
     'oauth-usage': () => answer({ five_hour: UNUSED, seven_day: UNUSED }, {}),
     'oauth-validate': () => answer({ account_uuid: account.accountUuid, organization_uuid: account.organizationUuid }, identity(account)),
     'oauth-token': (_, request) => {
-      const parsed = parseJsonBody(request.body, RefreshRequest, 'a refresh of the mock login')
+      const parsed = parseJsonBody(request.body, TokenRequest, 'an OAuth token request')
       if (parsed.kind === 'invalid') return { kind: 'declined', why: parsed.why, facts: {} }
+      const { grant_type, refresh_token } = parsed.value
+      // [LAW:nothing-unseen] What was asked, never the token itself: a refused one may be a real login's.
+      const asked = { grant_type, mock_refresh_token: refresh_token === REFRESH_TOKEN }
+      const why = refusal(grant_type, asked.mock_refresh_token)
+      if (why !== null) return { kind: 'declined', why, facts: asked }
       return answer(
         {
           token_type: 'Bearer',
@@ -92,7 +127,7 @@ export function accountGenerators(account: Account) {
           account: { uuid: account.accountUuid, email_address: account.emailAddress },
           organization: { uuid: account.organizationUuid, name: account.organizationName },
         },
-        { ...identity(account), grant_type: parsed.value.grant_type },
+        { ...identity(account), ...asked },
       )
     },
     'claude-cli-bootstrap': () =>
@@ -113,11 +148,5 @@ export function accountGenerators(account: Account) {
         },
         identity(account),
       ),
-    'organization-skills': ({ params }) => forOrganization(account, params.org, { skills: [] }),
-    // No `cc` selector config, so 2.1.289 caches no model catalog and offers its own models.
-    'model-selector': ({ params }) => forOrganization(account, params.org, { organization_uuid: account.organizationUuid }),
-    'organization-marketplaces': ({ params }) => forOrganization(account, params.org, { marketplaces: [] }),
-    // 2.1.289 asks for the next page while `has_more` is true.
-    'organization-plugins': ({ params }) => forOrganization(account, params.org, { plugins: [], has_more: false }),
-  } satisfies Generators<Row>
+  } satisfies Generators<AccountRow>
 }

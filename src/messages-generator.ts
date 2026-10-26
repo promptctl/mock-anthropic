@@ -16,12 +16,12 @@ export function messagesGenerator(dirs: readonly string[], builtIns: readonly Sc
     const parsed = parseMessagesRequest(request.body)
     // No script was matched against, so there is nothing to report beyond the why.
     if (parsed.kind === 'invalid') return { kind: 'declined', why: parsed.why, facts: {} }
-    const selection = firstReply(scripts, parsed.request)
+    const selection = firstReply(scripts, parsed.value)
     // [LAW:nothing-unseen] Each answer is built with its facts: the script that answered and what was
     // sent, or every script tried. "0 tried" is a request that found no scripts at all.
     switch (selection.kind) {
       case 'matched': {
-        const { response, rendered } = renderReply(selection.reply, parsed.request)
+        const { response, rendered } = renderReply(selection.reply, parsed.value)
         return { kind: 'response', response, facts: { script: selection.origin, reply: rendered } }
       }
       case 'unmatched':
