@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // [LAW:one-source-of-truth] The one declaration of what a synthetic UUID looks like: built by
@@ -52,15 +54,15 @@ type fields struct {
 	accountUUID, emailAddress, organizationUUID, organizationName, subscriptionType string
 }
 
-// [LAW:parse-dont-validate] An Account exists only as Parse's output, handed out by pointer: a failed
-// Parse returns nil, never an empty Account that reads as a real one.
-type Account struct{ f fields }
+// [LAW:parse-dont-validate] An Account exists only as Parse's output. It shares one frozen fields value
+// across copies; the zero Account holds none, so using one panics instead of reading as an empty identity.
+type Account struct{ f *fields }
 
-func (a *Account) AccountUUID() string                { return a.f.accountUUID }
-func (a *Account) EmailAddress() string               { return a.f.emailAddress }
-func (a *Account) OrganizationUUID() string           { return a.f.organizationUUID }
-func (a *Account) OrganizationName() string           { return a.f.organizationName }
-func (a *Account) SubscriptionType() SubscriptionType { return SubscriptionType(a.f.subscriptionType) }
+func (a Account) AccountUUID() string                { return a.f.accountUUID }
+func (a Account) EmailAddress() string               { return a.f.emailAddress }
+func (a Account) OrganizationUUID() string           { return a.f.organizationUUID }
+func (a Account) OrganizationName() string           { return a.f.organizationName }
+func (a Account) SubscriptionType() SubscriptionType { return SubscriptionType(a.f.subscriptionType) }
 
 type schemaField struct {
 	key   string
@@ -92,7 +94,7 @@ var schema = []schemaField{
 }
 
 // MarshalJSON writes the account in the form Parse reads.
-func (a *Account) MarshalJSON() ([]byte, error) {
+func (a Account) MarshalJSON() ([]byte, error) {
 	var out bytes.Buffer
 	out.WriteByte('{')
 	for i, field := range schema {
@@ -100,7 +102,7 @@ func (a *Account) MarshalJSON() ([]byte, error) {
 			out.WriteByte(',')
 		}
 		key, _ := json.Marshal(field.key)
-		value, _ := json.Marshal(*field.at(&a.f))
+		value, _ := json.Marshal(*field.at(a.f))
 		out.Write(key)
 		out.WriteByte(':')
 		out.Write(value)
@@ -129,14 +131,27 @@ func checkUUID(s string) string {
 	return ""
 }
 
+var hostname = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
+
+// checkText refuses what json.Unmarshal would hide: invalid UTF-8 (silently replaced with U+FFFD) and
+// control characters, so the account written back is the one the file holds.
+func checkText(raw json.RawMessage, s string) string {
+	if !utf8.Valid(raw) {
+		return "not valid UTF-8"
+	}
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return "contains a control character"
+	}
+	return ""
+}
+
 func checkEmail(s string) string {
 	address, err := mail.ParseAddress(s)
 	if err != nil || address.Address != s {
 		return "not a bare email address"
 	}
-	labels := strings.Split(s[strings.LastIndexByte(s, '@')+1:], ".")
-	if len(labels) < 2 || slices.Contains(labels, "") {
-		return "domain is not a dotted name"
+	if !hostname.MatchString(s[strings.LastIndexByte(s, '@')+1:]) {
+		return "domain is not a dotted host name"
 	}
 	return ""
 }
@@ -144,9 +159,9 @@ func checkEmail(s string) string {
 // Parse is the one checkpoint an account crosses [LAW:single-enforcer]. origin says where data came
 // from, so the error names both the source and every bad key. Keys match exactly: encoding/json's
 // case-insensitive, last-duplicate-wins struct decoding would accept keys `login` reads differently.
-func Parse(data []byte, origin string) (*Account, error) {
-	notJSON := func(err error) (*Account, error) {
-		return nil, &InputError{origin, "not JSON: " + err.Error()}
+func Parse(data []byte, origin string) (Account, error) {
+	notJSON := func(err error) (Account, error) {
+		return Account{}, &InputError{origin, "not JSON: " + err.Error()}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	open, err := decoder.Token()
@@ -154,7 +169,7 @@ func Parse(data []byte, origin string) (*Account, error) {
 		return notJSON(err)
 	}
 	if open != json.Delim('{') {
-		return nil, &InputError{origin, fmt.Sprintf("not a JSON object, got %v", open)}
+		return Account{}, &InputError{origin, fmt.Sprintf("not a JSON object, got %v", open)}
 	}
 
 	var f fields
@@ -185,7 +200,11 @@ func Parse(data []byte, origin string) (*Account, error) {
 			problems = append(problems, fmt.Sprintf("%s: not a string, got %s", key, value))
 			continue
 		}
-		if why := schema[i].check(s); why != "" {
+		why := checkText(value, s)
+		if why == "" {
+			why = schema[i].check(s)
+		}
+		if why != "" {
 			problems = append(problems, fmt.Sprintf("%s: %s, got %q", key, why, s))
 		}
 		*schema[i].at(&f) = s
@@ -194,7 +213,7 @@ func Parse(data []byte, origin string) (*Account, error) {
 		return notJSON(err)
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return nil, &InputError{origin, "data after the object"}
+		problems = append(problems, "data after the object")
 	}
 	for _, field := range schema {
 		if !seen[field.key] {
@@ -202,27 +221,29 @@ func Parse(data []byte, origin string) (*Account, error) {
 		}
 	}
 	if len(problems) > 0 {
-		return nil, &InputError{origin, strings.Join(problems, "; ")}
+		return Account{}, &InputError{origin, strings.Join(problems, "; ")}
 	}
-	return &Account{f}, nil
+	return Account{&f}, nil
 }
 
 // [LAW:effects-at-boundaries] ReadFile is the consumer override: a JSON file holding a complete
 // account, which replaces the default whole.
-func ReadFile(path string) (*Account, error) {
+func ReadFile(path string) (Account, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		var pathErr *os.PathError
 		if errors.As(err, &pathErr) {
 			err = pathErr.Err
 		}
-		return nil, &InputError{path, "cannot read: " + err.Error()}
+		return Account{}, &InputError{path, "cannot read: " + err.Error()}
 	}
 	return Parse(data, path)
 }
 
 // Default is the account the mock uses when no override is given; every identifier in it is synthetic.
-var Default = mustParse(`{
+func Default() Account { return defaultAccount }
+
+var defaultAccount = mustParse(`{
 	"accountUuid": "` + SyntheticUUID(1) + `",
 	"emailAddress": "user@mock-anthropic.invalid",
 	"organizationUuid": "` + SyntheticUUID(2) + `",
@@ -230,7 +251,7 @@ var Default = mustParse(`{
 	"subscriptionType": "max"
 }`)
 
-func mustParse(data string) *Account {
+func mustParse(data string) Account {
 	a, err := Parse([]byte(data), "Default")
 	if err != nil {
 		panic(err)

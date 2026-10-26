@@ -71,20 +71,36 @@ func TestSyntheticFormRejectsOtherUUIDs(t *testing.T) {
 	}
 }
 
+func TestCopiesAndValuesMarshalTheAccount(t *testing.T) {
+	data, err := json.Marshal(struct{ A Account }{Default()})
+	if err != nil || !strings.Contains(string(data), Default().AccountUUID()) {
+		t.Errorf("an Account held by value marshals as %s, %v", data, err)
+	}
+}
+
+func TestTheZeroAccountPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("reading the zero Account did not panic")
+		}
+	}()
+	_ = Account{}.AccountUUID()
+}
+
 func TestDefaultParsesAndIsSynthetic(t *testing.T) {
-	data, err := json.Marshal(Default)
+	data, err := json.Marshal(Default())
 	if err != nil {
 		t.Fatal(err)
 	}
 	again, err := Parse(data, "a copy of the default")
-	if err != nil || *again != *Default {
+	if err != nil || *again.f != *Default().f {
 		t.Fatalf("the default does not round-trip: %v, %v", again, err)
 	}
-	if !IsSyntheticUUID(Default.AccountUUID()) || !IsSyntheticUUID(Default.OrganizationUUID()) {
+	if !IsSyntheticUUID(Default().AccountUUID()) || !IsSyntheticUUID(Default().OrganizationUUID()) {
 		t.Errorf("default UUIDs are not synthetic: %s", data)
 	}
-	if !strings.HasSuffix(Default.EmailAddress(), ".invalid") {
-		t.Errorf("default email %q is not under .invalid", Default.EmailAddress())
+	if !strings.HasSuffix(Default().EmailAddress(), ".invalid") {
+		t.Errorf("default email %q is not under .invalid", Default().EmailAddress())
 	}
 }
 
@@ -138,6 +154,11 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 		{"nil uuid", writeJSON(t, with("organizationUuid", "00000000-0000-0000-0000-000000000000")), []string{"organizationUuid"}},
 		{"upper-case uuid", writeJSON(t, with("accountUuid", strings.ToUpper(SyntheticUUID(0xabc)))), []string{"accountUuid"}},
 		{"undotted email domain", writeJSON(t, with("emailAddress", "a@b")), []string{"emailAddress"}},
+		{"domain literal email", writeJSON(t, with("emailAddress", "a@[1.2.3.4]")), []string{"emailAddress"}},
+		{"bad host label email", writeJSON(t, with("emailAddress", "a@b.-c")), []string{"emailAddress"}},
+		{"control character", writeJSON(t, with("organizationName", "Org\x00")), []string{"organizationName", "control character"}},
+		{"invalid UTF-8", writeFile(t, "{\"organizationName\":\"Org\xff\"}"), []string{"organizationName", "UTF-8"}},
+		{"trailing data keeps field problems", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object", "accountUuid: not", "emailAddress: missing"}},
 		{"not an object", writeFile(t, "null"), []string{"not a JSON object"}},
 		{"not JSON", writeFile(t, "{ not json"), []string{"not JSON"}},
 		{"data after the object", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object"}},
@@ -169,8 +190,8 @@ func TestEveryBadKeyIsNamedAtOnce(t *testing.T) {
 	delete(a, "emailAddress")
 	a["accountUuid"], a["subscriptionType"], a["acountUuid"], a["organizationName"] = "x", "free", "x", 7
 	got, err := ReadFile(writeJSON(t, a))
-	if got != nil {
-		t.Errorf("a rejected file returned account %v, want nil", got)
+	if got != (Account{}) {
+		t.Errorf("a rejected file returned account %v, want the zero Account", got)
 	}
 	for _, name := range []string{"accountUuid", "subscriptionType", `"acountUuid"`, "organizationName", "emailAddress: missing"} {
 		if err == nil || !strings.Contains(err.Error(), name) {
