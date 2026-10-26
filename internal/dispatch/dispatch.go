@@ -55,30 +55,19 @@ func Dispatch(ctx context.Context, resolution endpoint.Resolution, miss error, r
 	}
 	switch reply := answer.Reply.(type) {
 	case generator.Response:
-		// [LAW:single-enforcer] A response the server cannot write is the generator's bug, caught here,
-		// before the server commits a status, as a 500 that names it.
-		if why := unwritable(reply); why != "" {
-			why = fmt.Sprintf("generator %s gave %s", resolution.Endpoint.ID(), why)
-			return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
-		}
 		return Dispatched{Verdict{Outcome: Served}, reply, answer.Facts}
 	case generator.Declined:
+		// [LAW:no-silent-failure] A 400 that says nothing is no answer: a decline names why, or it is the
+		// generator's bug.
+		if reply.Why == "" {
+			why := fmt.Sprintf("generator %s declined without saying why", resolution.Endpoint.ID())
+			return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
+		}
 		return Dispatched{Verdict{Unmatched, reply.Why}, ErrorResponse(Refusal, r, reply.Why), answer.Facts}
 	default:
 		why := fmt.Sprintf("generator gave no reply (%T)", answer.Reply)
 		return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
 	}
-}
-
-// unwritable is why a response cannot be written, or "": a status that is not a final one, or no body.
-func unwritable(r generator.Response) string {
-	switch {
-	case r.Status < 200 || r.Status > 999:
-		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
-	case r.Body == nil:
-		return "a response with no body"
-	}
-	return ""
 }
 
 // The table's refusals are declines too: a request with no endpoint, an out-of-scope endpoint, and an

@@ -92,6 +92,12 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("statusless", endpoint.API, "GET", "/v1/statusless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Response{Header: http.Header{}, Body: strings.NewReader("")}, Facts: generator.Facts{}}, nil
 		}),
+		endpoint.InScope("reasonless", endpoint.API, "GET", "/v1/reasonless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Declined{}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("nobodyallowed", endpoint.API, "GET", "/v1/nobodyallowed", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 204, Header: http.Header{}, Body: strings.NewReader("null")}, Facts: generator.Facts{}}, nil
+		}),
 		endpoint.InScope("panicsmidway", endpoint.API, "GET", "/v1/panicsmidway", streaming(func(context.Context) error { panic("midway") })),
 		endpoint.InScope("breaks", endpoint.API, "GET", "/v1/breaks", streaming(func(context.Context) error { return errors.New("source broke") })),
 		endpoint.InScope("stalls", endpoint.API, "GET", "/v1/stalls", streaming(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })),
@@ -291,8 +297,9 @@ func TestAFailingGeneratorGetsA500NamingIt(t *testing.T) {
 	for path, why := range map[string]string{
 		"/v1/errs":       "generator errs: boom",
 		"/v1/panics":     "generator panics panicked: kaboom",
-		"/v1/bodiless":   "generator bodiless gave a response with no body",
-		"/v1/statusless": "generator statusless gave status 0, not a final HTTP status",
+		"/v1/bodiless":   "the handler gave a response with no body",
+		"/v1/statusless": "the handler gave status 0, not a final HTTP status",
+		"/v1/reasonless": "generator reasonless declined without saying why",
 	} {
 		res, body := do(t, c, "GET", "https://api.anthropic.com"+path, nil)
 		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, "mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why) {
@@ -396,6 +403,37 @@ func TestAPanicAfterTheResponseBeganIsRecordedWithTheStatusSent(t *testing.T) {
 	}
 }
 
+func TestABodyNetHTTPRefusesFailsTheRequest(t *testing.T) {
+	h := start(t)
+	// The 204 and its refused body are cut off together, so the client may see only a broken connection.
+	if res, err := h.proxied().Get("https://api.anthropic.com/v1/nobodyallowed"); err == nil {
+		res.Body.Close()
+	}
+	if r := h.request(t); r.Outcome != RequestFailed || !strings.HasPrefix(r.Why, "net/http refused the response body") || *r.Status != 204 {
+		t.Errorf("record %+v", r)
+	}
+}
+
+func TestEachPlainRequestIsJudgedByItsHost(t *testing.T) {
+	h := start(t)
+	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: h.addr()})}}
+	if res, _ := do(t, c, "GET", "http://api.anthropic.com/v1/declines", nil); res.StatusCode != 400 {
+		t.Fatalf("first request: %d", res.StatusCode)
+	}
+	h.request(t)
+	// The same keep-alive connection, now for another host the table knows.
+	res, body := do(t, c, "POST", "http://"+platform+"/v1/oauth/token", nil)
+	if r := h.request(t); res.StatusCode != 400 || !strings.Contains(body, plainOnly) || r.Host != platform || r.Outcome != Unmatched || r.Why != plainOnly {
+		t.Errorf("got %d %s, record %+v", res.StatusCode, body, r)
+	}
+	if res, _ := do(t, c, "GET", "http://api.anthropic.com", nil); res.StatusCode != 400 {
+		t.Errorf("root: %d", res.StatusCode)
+	}
+	if r := h.request(t); r.Path != "/" {
+		t.Errorf("an empty path is /: %+v", r)
+	}
+}
+
 func TestAHostWithATrailingRootDotIsTheHost(t *testing.T) {
 	h := start(t)
 	if got := h.raw(t, "CONNECT api.anthropic.com.:443 HTTP/1.1\r\n\r\n"); !strings.HasPrefix(got, "HTTP/1.1 200") {
@@ -465,6 +503,7 @@ func TestConnectionsThatCarryNoRequest(t *testing.T) {
 	}{
 		"one that sends nothing":                {"", Closed, ""},
 		"one that leaves mid request line":      {"GE", ConnectionFailed, unfinishedLine},
+		"one that leaves mid CONNECT head":      {"CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: x\r\n", ConnectionFailed, unfinishedHead},
 		"one whose request net/http turns away": {"GET / HTTP/1.1\r\nno colon here\r\n\r\n", ConnectionFailed, plainUnanswered},
 	} {
 		h.raw(t, c.send)

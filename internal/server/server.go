@@ -6,6 +6,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -80,6 +81,8 @@ const (
 	bodyCutOff       = "the request body finished"
 	notReady         = "the response was ready"
 	bodyUnfinished   = "the body finished"
+	unfinishedHead   = "closed before finishing its CONNECT head"
+	plainOnly        = "not " + endpoint.API + ", the only host the plain port answers; others are reached through CONNECT"
 )
 
 var requestLine = regexp.MustCompile(`^([A-Z]+) (\S+) HTTP/1\.[01]\r$`)
@@ -220,7 +223,7 @@ func (s *Server) open(c *clientConn) {
 		c.Close()
 		e := closedRecord(endpoint.API, nil, nil, 0, c)
 		if o.read > 0 && c.closedBy != ByStop {
-			e.Outcome, e.Why = ConnectionFailed, unfinishedLine
+			e.Outcome, e.Why = ConnectionFailed, o.why
 		}
 		s.emit(e)
 	}
@@ -262,22 +265,27 @@ func (s *Server) tunnel(c *clientConn, o connect) {
 
 // RFC 9112 3.2.2: a request whose target is in absolute form is addressed to the host it names. The
 // plain port is the origin for api.anthropic.com alone, so an http:// URL for any other host, which an
-// HTTP_PROXY client sends this way, is refused as a CONNECT to an unknown host is. The front reads only
-// a connection's first request line, so a connection is judged by its first request.
+// HTTP_PROXY client sends this way, is refused as a CONNECT to an unknown host is. The front judges a
+// connection by its first request; ServeHTTP judges each later one on it the same way.
 func (s *Server) plain(c *clientConn, o plain) {
-	host := endpoint.API
-	if !strings.HasPrefix(o.target, "/") {
-		host = o.target
-		if u, err := url.Parse(o.target); err == nil && u.Hostname() != "" {
-			host = endpoint.CanonicalHost(u.Host)
-		}
-	}
-	if host != endpoint.API {
-		s.forbid(c, host, nil, o.target, fmt.Sprintf("not %s, the only host the plain port answers; others are reached through CONNECT", endpoint.API))
+	if host := plainHost(o.target); host != endpoint.API {
+		s.forbid(c, host, nil, o.target, plainOnly)
 		return
 	}
 	c.read = io.MultiReader(bytes.NewReader(o.read), c.Conn)
 	s.serve(c, kind{authority: endpoint.API, unanswered: plainUnanswered}, c)
+}
+
+// plainHost is the host a plain request's target addresses: the API for origin form, the host an
+// absolute-form target names, or the target's raw text when it names none.
+func plainHost(target string) string {
+	if strings.HasPrefix(target, "/") {
+		return endpoint.API
+	}
+	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+		return endpoint.CanonicalHost(u.Host)
+	}
+	return target
 }
 
 // forbid answers a connection addressed to a host or port the mock does not answer with a 403 naming
@@ -351,7 +359,10 @@ type (
 		read   []byte
 	}
 	refused struct{ why string }
-	closed  struct{ read int }
+	closed  struct {
+		read int
+		why  string // what it left unfinished, when it sent anything
+	}
 )
 
 func (connect) opening() {}
@@ -391,7 +402,11 @@ func readOpening(r io.Reader) opening {
 			}
 		}
 		if err != nil {
-			return closed{len(read)}
+			why := unfinishedLine
+			if bytes.IndexByte(read, '\n') != -1 {
+				why = unfinishedHead
+			}
+			return closed{len(read), why}
 		}
 	}
 }
@@ -429,6 +444,17 @@ func parsePort(text string) (int, bool) {
 	}
 	n, _ := strconv.Atoi(text)
 	return n, n <= 65535
+}
+
+// unwritable is why a response cannot be written, or "": a status that is not a final one, or no body.
+func unwritable(r generator.Response) string {
+	switch {
+	case r.Status < 200 || r.Status > 999:
+		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
+	case r.Body == nil:
+		return "a response with no body"
+	}
+	return ""
 }
 
 // clientConn is one accepted connection. It records who ended it: the mock's Stop, the client (its
@@ -563,11 +589,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sc.client.requests.Add(1)
 	started := time.Now()
 
-	// [LAW:types-are-the-program] Every request on a connection is addressed to the connection's
-	// authority: the URL is built from it, so neither the Host header nor an absolute-form target can
-	// choose the host.
-	u := &url.URL{Scheme: "https", Host: sc.kind.authority, Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery}
-	resolution, miss := s.table.Resolve(r.Method, sc.kind.authority, u.EscapedPath())
+	// [LAW:types-are-the-program] Every request in a tunnel is addressed to the tunnel's authority, and
+	// every plain one to the host its target names; the URL is built from that, so the Host header
+	// cannot choose the host. A plain request for any host but the API is refused, as its connection's
+	// first one would have been.
+	authority := sc.kind.authority
+	if sc.kind.tunnel == nil {
+		authority = plainHost(r.RequestURI)
+	}
+	// An empty path in absolute form is "/" (RFC 9110 4.2.3).
+	path := cmp.Or(r.URL.Path, "/")
+	u := &url.URL{Scheme: "https", Host: authority, Path: path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery}
+	resolution, miss := s.table.Resolve(r.Method, authority, u.EscapedPath())
 	var id *endpoint.ID
 	if miss == nil {
 		e := resolution.Endpoint.ID()
@@ -611,10 +644,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Body = body
-	d := s.handle(r.Context(), resolution, miss, req)
+	d := dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Unmatched, Why: plainOnly}, Response: dispatch.ErrorResponse(dispatch.Refusal, req, plainOnly), Facts: generator.Facts{}}
+	if authority == sc.kind.authority {
+		d = s.handle(r.Context(), resolution, miss, req)
+	}
 	if r.Context().Err() != nil {
-		rec.record(nil, nil, Aborted, endedEarly(sc.client.endedBy(), notReady))
+		rec.record(nil, d.Facts, Aborted, endedEarly(sc.client.endedBy(), notReady))
 		return
+	}
+	// [LAW:single-enforcer] Every Handler's response passes here, so a response the server cannot
+	// write is caught here, before its status is committed: the mock's own bug, a 500 that names it.
+	if why := unwritable(d.Response); why != "" {
+		why = "the handler gave " + why
+		d = dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Failed, Why: why}, Response: dispatch.ErrorResponse(dispatch.Failure, req, why), Facts: d.Facts}
 	}
 	status = d.Response.Status
 	for k, vs := range d.Response.Header {
@@ -628,6 +670,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch delivery := deliver(r.Context(), w, d.Response.Body); {
+	case delivery.refused != nil:
+		rec.record(&status, d.Facts, RequestFailed, fmt.Sprintf("net/http refused the response body: %v", delivery.refused))
+		panic(http.ErrAbortHandler)
 	case delivery.sourceErr != nil:
 		rec.record(&status, d.Facts, RequestFailed, fmt.Sprintf("response body failed: %v", delivery.sourceErr))
 		// A broken stream, not a truncated one that looks whole: the connection is cut.
@@ -642,6 +687,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type delivery struct {
 	abandoned bool
 	sourceErr error
+	refused   error // a body net/http will not write: one on a status that has none, or past its Content-Length
 }
 
 // deliver copies body to the client unbuffered, flushing each chunk, so a stream reaches the client as
@@ -653,6 +699,9 @@ func deliver(ctx context.Context, w http.ResponseWriter, body io.Reader) deliver
 		n, err := body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				if errors.Is(werr, http.ErrBodyNotAllowed) || errors.Is(werr, http.ErrContentLength) {
+					return delivery{refused: werr}
+				}
 				return delivery{abandoned: true}
 			}
 			if ferr := flusher.Flush(); ferr != nil {
