@@ -71,6 +71,8 @@ const (
 	// server refuse, is refused, so a client that sends one hears why instead of waiting on a CRLF.
 	maxLine = 8192
 	maxHead = 65536
+	// How long a refused client is given to read its answer and leave.
+	refuseDrain = 5 * time.Second
 	// net/http answers a malformed request or oversized headers itself, before the mock sees it.
 	tunnelUnanswered = "closed before any request reached the mock: a client that opens a tunnel and never uses it closes this way, and so does a request net/http answers itself as malformed or with oversized headers"
 	plainUnanswered  = "closed before any request reached the mock: net/http answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head leaves this way too"
@@ -111,6 +113,12 @@ func Start(o Options) (*Server, error) {
 	}
 	s.inner = &http.Server{
 		Handler: s,
+		// net/http is done with a connection, its last handler returned, once it reports it closed.
+		ConnState: func(c net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				close(c.(*servedConn).released)
+			}
+		},
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			return context.WithValue(ctx, servedKey{}, c.(*servedConn))
 		},
@@ -224,7 +232,7 @@ func (s *Server) tunnel(c *clientConn, o connect) {
 	switch {
 	case port == nil:
 		why = "malformed CONNECT target"
-	case !s.knows(host):
+	case !s.table.Knows(host):
 		why = "not a host the mock answers"
 	case *port != httpsPort:
 		why = fmt.Sprintf("not port %d, the only port the mock answers", httpsPort)
@@ -252,15 +260,6 @@ func (s *Server) tunnel(c *clientConn, o connect) {
 	s.serve(c, k, t)
 }
 
-func (s *Server) knows(host string) bool {
-	for _, h := range s.table.Hosts() {
-		if h == host {
-			return true
-		}
-	}
-	return false
-}
-
 // RFC 9112 3.2.2: a request whose target is in absolute form is addressed to the host it names. The
 // plain port is the origin for api.anthropic.com alone, so an http:// URL for any other host, which an
 // HTTP_PROXY client sends this way, is refused as a CONNECT to an unknown host is. The front reads only
@@ -270,7 +269,7 @@ func (s *Server) plain(c *clientConn, o plain) {
 	if !strings.HasPrefix(o.target, "/") {
 		host = o.target
 		if u, err := url.Parse(o.target); err == nil && u.Hostname() != "" {
-			host = strings.ToLower(u.Hostname())
+			host = endpoint.CanonicalHost(u.Host)
 		}
 	}
 	if host != endpoint.API {
@@ -297,18 +296,25 @@ func (s *Server) refuse(c *clientConn, status, what string) {
 	if tcp, ok := c.Conn.(*net.TCPConn); ok {
 		tcp.CloseWrite()
 	}
-	io.Copy(io.Discard, c.Conn) //nolint:errcheck // the answer is sent; how the client leaves changes nothing
+	// A client that never ends its side is not waited on past refuseDrain.
+	c.Conn.SetReadDeadline(time.Now().Add(refuseDrain)) //nolint:errcheck // a socket that refuses a deadline is closed below anyway
+	io.Copy(io.Discard, c.Conn)                         //nolint:errcheck // the answer is sent; how the client leaves changes nothing
 	c.Close()
 }
 
 // serve hands a connection to net/http, or, when it has nothing to serve (conn is nil: its handshake
-// failed), closes it; either way the connection's one record is written once it has closed.
+// failed), closes it; either way the connection's one record is written once it has closed and every
+// request on it has written its own. [LAW:no-ambient-temporal-coupling] The connection's unit of work
+// lasts until net/http releases it, so Stop cannot return between a request's head and its handler.
 func (s *Server) serve(c *clientConn, k kind, conn net.Conn) {
+	released := make(chan struct{})
 	if conn == nil {
 		c.Close()
+		close(released)
 	} else {
-		s.served.push(&servedConn{Conn: conn, client: c, kind: k})
+		s.served.push(&servedConn{Conn: conn, client: c, kind: k, released: released})
 	}
+	<-released
 	<-c.done
 	e := closedRecord(k.authority, k.tunnel, k.port, c.requests.Load(), c)
 	switch {
@@ -413,7 +419,7 @@ func connectTarget(text string) (string, *int) {
 	if err != nil || !ok {
 		return text, nil
 	}
-	return strings.ToLower(host), &port
+	return endpoint.CanonicalHost(host), &port
 }
 
 // [LAW:one-source-of-truth] What a port number is, as text: one to five decimal digits, at most 65535.
@@ -498,8 +504,9 @@ func (c *clientConn) Close() error {
 // front connection it runs over.
 type servedConn struct {
 	net.Conn
-	client *clientConn
-	kind   kind
+	client   *clientConn
+	kind     kind
+	released chan struct{} // closed once net/http is done with the connection
 }
 
 // Read marks the client's side ended when it ends: inside a tunnel, a TLS close_notify ends it
@@ -529,6 +536,7 @@ func (q *queue) push(c *servedConn) {
 	case q.conns <- c:
 	case <-q.closed:
 		c.client.Close()
+		close(c.released)
 	}
 }
 
@@ -553,8 +561,6 @@ func (q *queue) Addr() net.Addr { return q.addr }
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sc := r.Context().Value(servedKey{}).(*servedConn)
 	sc.client.requests.Add(1)
-	s.units.Add(1)
-	defer s.units.Done()
 	started := time.Now()
 
 	// [LAW:types-are-the-program] Every request on a connection is addressed to the connection's
@@ -573,7 +579,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &request{emit: s.emit, event: RequestEvent{Event: "request", Tunnel: sc.kind.tunnel, Host: u.Hostname(), Method: r.Method, Path: u.EscapedPath(), Query: query, Endpoint: id, Facts: generator.Facts{}}, started: started}
 	req := generator.Request{Method: r.Method, URL: u, Header: r.Header}
-	answered := false
+	// status is the one sent once answered: a panic after it is recorded with it, not with a 500.
+	status, answered := 0, false
 	// A Handler that panics is the mock's own bug: a 500 that names it, or, once the response has
 	// begun, a cut connection.
 	defer func() {
@@ -585,12 +592,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		why := fmt.Sprintf("the mock failed: %v", p)
-		status := http.StatusInternalServerError
-		rec.record(&status, nil, RequestFailed, why)
 		if answered {
+			rec.record(&status, nil, RequestFailed, why)
 			panic(http.ErrAbortHandler)
 		}
-		failure := dispatch.ErrorResponse(dispatch.Failed, req, why)
+		failure := dispatch.ErrorResponse(dispatch.Failure, req, why)
+		rec.record(&failure.Status, nil, RequestFailed, why)
 		for k, vs := range failure.Header {
 			w.Header()[k] = vs
 		}
@@ -609,13 +616,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.record(nil, nil, Aborted, endedEarly(sc.client.endedBy(), notReady))
 		return
 	}
-	status := d.Response.Status
+	status = d.Response.Status
 	for k, vs := range d.Response.Header {
 		w.Header()[k] = vs
 	}
 	answered = true
 	w.WriteHeader(status)
-	// A response to HEAD carries the headers a GET would, and no body (RFC 9110 9.3.2).
+	// A response to HEAD has no body (RFC 9110 9.3.2): net/http refuses one, so none is delivered.
 	if r.Method == http.MethodHead {
 		rec.record(&status, d.Facts, RequestOutcome(d.Verdict.Outcome), d.Verdict.Why)
 		return

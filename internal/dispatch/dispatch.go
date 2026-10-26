@@ -51,17 +51,34 @@ func Dispatch(ctx context.Context, resolution endpoint.Resolution, miss error, r
 	answer, err := decide(ctx, resolution, miss, r)
 	if err != nil {
 		// [LAW:no-silent-failure] A generator that fails is the mock's own bug: a 500 that names it.
-		return Dispatched{Verdict{Failed, err.Error()}, ErrorResponse(Failed, r, err.Error()), generator.Facts{}}
+		return Dispatched{Verdict{Failed, err.Error()}, ErrorResponse(Failure, r, err.Error()), generator.Facts{}}
 	}
 	switch reply := answer.Reply.(type) {
 	case generator.Response:
+		// [LAW:single-enforcer] A response the server cannot write is the generator's bug, caught here,
+		// before the server commits a status, as a 500 that names it.
+		if why := unwritable(reply); why != "" {
+			why = fmt.Sprintf("generator %s gave %s", resolution.Endpoint.ID(), why)
+			return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
+		}
 		return Dispatched{Verdict{Outcome: Served}, reply, answer.Facts}
 	case generator.Declined:
-		return Dispatched{Verdict{Unmatched, reply.Why}, ErrorResponse(Unmatched, r, reply.Why), answer.Facts}
+		return Dispatched{Verdict{Unmatched, reply.Why}, ErrorResponse(Refusal, r, reply.Why), answer.Facts}
 	default:
 		why := fmt.Sprintf("generator gave no reply (%T)", answer.Reply)
-		return Dispatched{Verdict{Failed, why}, ErrorResponse(Failed, r, why), answer.Facts}
+		return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
 	}
+}
+
+// unwritable is why a response cannot be written, or "": a status that is not a final one, or no body.
+func unwritable(r generator.Response) string {
+	switch {
+	case r.Status < 200 || r.Status > 999:
+		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
+	case r.Body == nil:
+		return "a response with no body"
+	}
+	return ""
 }
 
 // The table's refusals are declines too: a request with no endpoint, an out-of-scope endpoint, and an
@@ -95,20 +112,24 @@ func decide(ctx context.Context, resolution endpoint.Resolution, miss error, r g
 
 // The Anthropic API's error envelope, so Claude Code shows the message, and `x-should-retry: false`,
 // which the Anthropic SDK obeys, so a gap is one loud error and not a run of slow retries. Every error
-// response the mock makes for a request is this one, and its outcome decides its status and type.
-var errorKinds = map[Outcome]struct {
-	status int
-	typ    string
-}{
-	Unmatched: {http.StatusBadRequest, "invalid_request_error"},
-	Failed:    {http.StatusInternalServerError, "api_error"},
+// response the mock makes for a request is this one, and its kind decides its status and type.
+// [LAW:types-are-the-program] The kinds are the two error outcomes and nothing else, so no caller can
+// ask for the error response of a Served request.
+type errorKind struct {
+	outcome Outcome
+	status  int
+	typ     string
 }
 
-// ErrorResponse is the response for an Unmatched or Failed request: its body names the outcome, the
-// method, the host, the path, and why.
-func ErrorResponse(outcome Outcome, r generator.Request, why string) generator.Response {
-	kind := errorKinds[outcome]
-	message := fmt.Sprintf("mock-anthropic %s: %s %s %s: %s", strings.ToUpper(string(outcome)), r.Method, r.URL.Hostname(), r.URL.EscapedPath(), why)
+var (
+	Refusal = errorKind{Unmatched, http.StatusBadRequest, "invalid_request_error"}
+	Failure = errorKind{Failed, http.StatusInternalServerError, "api_error"}
+)
+
+// ErrorResponse is the response for an Unmatched (Refusal) or Failed (Failure) request: its body names
+// the outcome, the method, the host, the path, and why.
+func ErrorResponse(kind errorKind, r generator.Request, why string) generator.Response {
+	message := fmt.Sprintf("mock-anthropic %s: %s %s %s: %s", strings.ToUpper(string(kind.outcome)), r.Method, r.URL.Hostname(), r.URL.EscapedPath(), why)
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": kind.typ, "message": message}})
 	return generator.Response{
 		Status: kind.status,

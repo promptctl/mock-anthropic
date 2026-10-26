@@ -86,6 +86,13 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("panics", endpoint.API, "GET", "/v1/panics", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			panic("kaboom")
 		}),
+		endpoint.InScope("bodiless", endpoint.API, "GET", "/v1/bodiless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 204, Header: http.Header{}}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("statusless", endpoint.API, "GET", "/v1/statusless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Header: http.Header{}, Body: strings.NewReader("")}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("panicsmidway", endpoint.API, "GET", "/v1/panicsmidway", streaming(func(context.Context) error { panic("midway") })),
 		endpoint.InScope("breaks", endpoint.API, "GET", "/v1/breaks", streaming(func(context.Context) error { return errors.New("source broke") })),
 		endpoint.InScope("stalls", endpoint.API, "GET", "/v1/stalls", streaming(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })),
 		endpoint.InScope("waits", endpoint.API, "POST", "/v1/waits", waitsForCtx),
@@ -282,8 +289,10 @@ func TestAFailingGeneratorGetsA500NamingIt(t *testing.T) {
 	h := start(t)
 	c := h.proxied()
 	for path, why := range map[string]string{
-		"/v1/errs":   "generator errs: boom",
-		"/v1/panics": "generator panics panicked: kaboom",
+		"/v1/errs":       "generator errs: boom",
+		"/v1/panics":     "generator panics panicked: kaboom",
+		"/v1/bodiless":   "generator bodiless gave a response with no body",
+		"/v1/statusless": "generator statusless gave status 0, not a final HTTP status",
 	} {
 		res, body := do(t, c, "GET", "https://api.anthropic.com"+path, nil)
 		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, "mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why) {
@@ -370,6 +379,38 @@ func TestARequestWhoseBodyIsCutOffIsAborted(t *testing.T) {
 	conn.Close()
 	if r := h.request(t); r.Outcome != Aborted || r.Why != "client closed before the request body finished" {
 		t.Errorf("record %+v", r)
+	}
+}
+
+func TestAPanicAfterTheResponseBeganIsRecordedWithTheStatusSent(t *testing.T) {
+	h := start(t)
+	res, err := h.proxied().Get("https://api.anthropic.com/v1/panicsmidway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := io.ReadAll(res.Body); res.StatusCode != 200 || err == nil || string(body) != "first chunk\n" {
+		t.Errorf("client got %d %q, %v; want 200, the first chunk, and a broken stream", res.StatusCode, body, err)
+	}
+	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "the mock failed: midway" || *r.Status != 200 {
+		t.Errorf("record %+v", r)
+	}
+}
+
+func TestAHostWithATrailingRootDotIsTheHost(t *testing.T) {
+	h := start(t)
+	if got := h.raw(t, "CONNECT api.anthropic.com.:443 HTTP/1.1\r\n\r\n"); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Errorf("CONNECT answered %q", got)
+	}
+	if e := h.connection(t); e.Host != endpoint.API || e.Outcome == Refused {
+		t.Errorf("tunnel %+v", e)
+	}
+	// An HTTP_PROXY client sends an http:// URL to the plain port in absolute form.
+	proxy := &url.URL{Scheme: "http", Host: h.addr()}
+	if res, body := do(t, &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}, "GET", "http://api.anthropic.com./v1/declines", nil); res.StatusCode != 400 {
+		t.Errorf("plain answered %d %s", res.StatusCode, body)
+	}
+	if r := h.request(t); *r.Endpoint != "declines" {
+		t.Errorf("request %+v", r)
 	}
 }
 
