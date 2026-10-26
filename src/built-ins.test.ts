@@ -1,43 +1,17 @@
-import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import { BUILT_INS } from './built-ins.ts'
-import { dispatch, type Generators, type MockRequest } from './dispatch.ts'
-import { API, ENDPOINT_TABLE, resolveEndpoint, type Row } from './endpoints.ts'
-import { messagesGenerator } from './messages-generator.ts'
+import { scriptDirectories, sendMessages } from './testing.ts'
 
-const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-built-ins-'))
-afterAll(() => rm(root, { recursive: true, force: true }))
+const { directory } = await scriptDirectories('built-ins')
 
-let nextDir = 0
-async function directory(scripts: Record<string, unknown> = {}): Promise<string> {
-  const dir = join(root, String(nextDir++))
-  await mkdir(dir)
-  for (const [name, script] of Object.entries(scripts)) await Bun.write(join(dir, name), JSON.stringify(script))
-  return dir
-}
+// A Messages request with the built-ins after the given consumer directories, as the server answers it.
+const send = (body: unknown, dirs: readonly string[] = []) => sendMessages(JSON.stringify(body), dirs, BUILT_INS)
 
-// A Messages request through dispatch, with the built-ins after the given consumer directories, as
-// the server answers it.
-function send(body: unknown, dirs: readonly string[] = []) {
-  const request: MockRequest = { method: 'POST', url: new URL(`https://${API}/v1/messages`), headers: new Headers(), body: JSON.stringify(body) }
-  const generators: Generators<Row> = { messages: messagesGenerator(dirs, BUILT_INS) }
-  return dispatch(generators, resolveEndpoint(ENDPOINT_TABLE, request.method, request.url), request)
-}
-
-// The text a reply carries, whether streamed or sent as one JSON message.
+// The text of a JSON reply. How a reply streams is the renderer's, the same for every reply.
 async function replyText(response: Response): Promise<string> {
-  if (!response.headers.get('content-type')?.startsWith('text/event-stream')) {
-    const message = (await response.json()) as { content: { text: string }[] }
-    return message.content.map(block => block.text).join('')
-  }
-  return (await response.text())
-    .split('\n')
-    .filter(line => line.startsWith('data: '))
-    .map(line => JSON.parse(line.slice('data: '.length)) as { type: string; delta?: { type: string; text?: string } })
-    .flatMap(event => (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' ? [event.delta.text] : []))
-    .join('')
+  const message = (await response.json()) as { content: { text: string }[] }
+  return message.content.map(block => block.text).join('')
 }
 
 // Bodies in the shapes Claude Code sends, written here: its side queries put their prompt in its own
@@ -53,17 +27,17 @@ const sideQuery = (prompt: string, user: unknown, extra: Record<string, unknown>
 })
 
 const TITLE_SCHEMA = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false }
-const titleRequest = (opening: string, stream: boolean) =>
+const titleRequest = (opening: string) =>
   sideQuery(`${opening} The title is a name for what the session is about.\n\nReturn JSON with a single "title" field.`, '<session>\nmake the parser faster\n</session>\n\nWrite the title in English.', {
-    stream,
     output_config: { format: { type: 'json_schema', schema: TITLE_SCHEMA } },
   })
-const TITLE_2_1_289 = 'You are naming a coding session so the user can pick it out of a long list of sessions.'
+const TITLE_CURRENT = 'You are naming a coding session so the user can pick it out of a long list of sessions.'
 const TITLE_OLDER = 'Generate a concise, sentence-case title'
 
 const CLASSIFIER = 'You are a security monitor for autonomous AI coding agents.'
 const SEVERITY_FORMAT = '## Output Format\n\nOutput <severity>N</severity> where N is an integer 0-100 and 50 is exactly the allow/block boundary.'
 const BLOCK_FORMAT = '## Output Format\n\nIf the action should be blocked:\n<block>yes</block>\n\nIf the action should be allowed:\n<block>no</block>'
+const OTHER_FORMAT = '## Output Format\n\nAnswer ALLOW or DENY.'
 const classifierRequest = (format: string) =>
   sideQuery(
     `${CLASSIFIER}\n\n## Context\n\nThe agent you are monitoring is an autonomous coding agent.\n\n${format}`,
@@ -89,19 +63,17 @@ const says = (text: string) => ({ kind: 'message', content: [{ type: 'text', tex
 
 describe('built-in answers', () => {
   for (const [phrasing, opening] of [
-    ['2.1.289', TITLE_2_1_289],
+    ['2.1.283 on', TITLE_CURRENT],
     ['older', TITLE_OLDER],
   ] as const) {
-    for (const stream of [false, true]) {
-      test(`the session title (${phrasing} phrasing, ${stream ? 'streamed' : 'JSON'}) is the JSON object its output format asks for`, async () => {
-        const { verdict, response, facts } = await send(titleRequest(opening, stream))
-        expect(verdict).toEqual({ outcome: 'served' })
-        const answer = JSON.parse(await replyText(response)) as unknown
-        expect(answer).toEqual({ title: expect.stringMatching(/\S/) })
-        expect(Object.keys(answer as object)).toEqual(['title'])
-        expect(facts).toMatchObject({ script: 'built-in: session title' })
-      })
-    }
+    test(`the session title (${phrasing} phrasing) is the JSON object its output format asks for`, async () => {
+      const { verdict, response, facts } = await send(titleRequest(opening))
+      expect(verdict).toEqual({ outcome: 'served' })
+      const answer = JSON.parse(await replyText(response)) as unknown
+      expect(answer).toEqual({ title: expect.stringMatching(/\S/) })
+      expect(Object.keys(answer as object)).toEqual(['title'])
+      expect(facts).toMatchObject({ script: 'built-in: session title' })
+    })
   }
 
   test('the auto mode classifier, asked for a severity, allows', async () => {
@@ -119,6 +91,14 @@ describe('built-in answers', () => {
     expect(facts).toMatchObject({ script: 'built-in: quota probe', reply: { kind: 'json', stop_reason: 'max_tokens' } })
   })
 
+  test('the auto mode classifier, asked for a block decision, allows', async () => {
+    const { verdict, response, facts } = await send(classifierRequest(BLOCK_FORMAT))
+    expect(verdict).toEqual({ outcome: 'served' })
+    // Claude Code's reading of a block answer: every <block> tag says the same, and `no` allows.
+    expect([...(await replyText(response)).matchAll(/<block>(yes|no)\b/gi)].map(tag => tag[1])).toEqual(['no'])
+    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier' })
+  })
+
   test('a consumer script blocks the classifier, ahead of the built-in', async () => {
     const dir = await directory({ 'block.json': { match: { bodyContains: [CLASSIFIER] }, reply: says('<severity>72</severity>') } })
     const { response, facts } = await send(classifierRequest(SEVERITY_FORMAT), [dir])
@@ -127,8 +107,8 @@ describe('built-in answers', () => {
   })
 
   test('a consumer script overrides the session title, ahead of the built-in', async () => {
-    const dir = await directory({ 'title.json': { match: { bodyContains: [TITLE_2_1_289] }, reply: says('{"title":"Parser speed"}') } })
-    const { response, facts } = await send(titleRequest(TITLE_2_1_289, false), [dir])
+    const dir = await directory({ 'title.json': { match: { bodyContains: [TITLE_CURRENT] }, reply: says('{"title":"Parser speed"}') } })
+    const { response, facts } = await send(titleRequest(TITLE_CURRENT), [dir])
     expect(JSON.parse(await replyText(response))).toEqual({ title: 'Parser speed' })
     expect(facts).toMatchObject({ script: join(dir, 'title.json') })
   })
@@ -140,14 +120,14 @@ describe('built-in answers', () => {
     expect(facts).toEqual({ scripts_tried: BUILT_INS.map(script => script.origin) })
   })
 
-  test('a classifier asking for a block decision, which no built-in answers, gets the 400', async () => {
-    const { verdict, response } = await send(classifierRequest(BLOCK_FORMAT))
+  test('a classifier asking for an answer in a format no built-in knows gets the 400', async () => {
+    const { verdict, response } = await send(classifierRequest(OTHER_FORMAT))
     expect(verdict).toMatchObject({ outcome: 'unmatched' })
     expect(response.status).toBe(400)
   })
 
   test("a main turn that quotes the prompts is not one of Claude Code's own calls", async () => {
-    const quoted = `What does "${TITLE_2_1_289}" mean, and "${CLASSIFIER} ${SEVERITY_FORMAT}"? Also: quota`
+    const quoted = `What does "${TITLE_CURRENT}" mean, and "${CLASSIFIER} ${SEVERITY_FORMAT}"? Also: quota`
     const { verdict } = await send({
       model: MODEL,
       max_tokens: 1,

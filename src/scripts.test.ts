@@ -1,26 +1,11 @@
-import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { describe, expect, test } from 'bun:test'
+import { mkdir, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
 import { firstReply, type Reply, readScripts, type Script, type Selection, scriptsInOrder } from './scripts.ts'
+import { scriptDirectories, writeScript } from './testing.ts'
 
-const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-scripts-'))
-afterAll(() => rm(root, { recursive: true, force: true }))
-
-let nextDir = 0
-async function directory(scripts: Record<string, unknown> = {}): Promise<string> {
-  const dir = join(root, String(nextDir++))
-  await mkdir(dir)
-  for (const [name, script] of Object.entries(scripts)) await writeScript(dir, name, script)
-  return dir
-}
-
-async function writeScript(dir: string, name: string, script: unknown): Promise<string> {
-  const path = join(dir, name)
-  await Bun.write(path, typeof script === 'string' ? script : JSON.stringify(script))
-  return path
-}
+const { root, directory } = await scriptDirectories('scripts')
 
 function request(...messages: { role: 'user' | 'assistant'; content: unknown }[]): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify({ model: 'claude-sonnet-5-5', max_tokens: 1024, messages }))
