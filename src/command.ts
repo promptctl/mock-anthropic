@@ -118,7 +118,7 @@ function told(reason: EndReason, index: number): string {
 }
 
 function usage(commands: Commands, why: string): Ending {
-  const lines = Object.entries(commands).map(([name, command]) => `  ${name} ${command.usage}`)
+  const lines = Object.entries(commands).map(([name, command]) => `  ${name} ${command.usage}`.trimEnd())
   process.stderr.write(`mock-anthropic: ${why}\nusage: bun src/cli.ts <command>\n${lines.join('\n')}\n`)
   return { outcome: 'usage', why, facts: {} }
 }

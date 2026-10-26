@@ -40,6 +40,14 @@ export type Generators<R extends EndpointRow> = {
   readonly [Row in R as Row extends { scope: 'in-scope' } ? Row['id'] : never]?: Generator<Row>
 }
 
+// [LAW:one-source-of-truth] What "a row has a generator" means, for serving a request and for `coverage`
+// alike. The key type and the row type are joined by Generators' mapping; indexing by a row's id reads
+// the generator for that row, which this cast is the one place to say. Own keys only, so an id such as
+// `toString` is not answered by what every object inherits.
+export function generatorFor<R extends EndpointRow>(generators: Generators<R>, row: Pick<EndpointRow, 'id'>): Generator<R> | undefined {
+  return Object.hasOwn(generators, row.id) ? (generators as Partial<Record<string, Generator<R>>>)[row.id] : undefined
+}
+
 export type Verdict =
   | { readonly outcome: 'served' }
   | { readonly outcome: 'unmatched'; readonly why: string }
@@ -83,9 +91,7 @@ async function decide<R extends EndpointRow>(
   if (resolution === null) return { kind: 'declined', why: 'no endpoint', facts: NO_FACTS }
   const { endpoint } = resolution
   if (endpoint.scope === 'out-of-scope') return { kind: 'declined', why: `out of scope: ${endpoint.reason}`, facts: NO_FACTS }
-  // The key type and the row type are joined by Generators' mapping; indexing by a row's id reads the
-  // generator for that row, which this cast is the one place to say.
-  const generator = (generators as Partial<Record<string, Generator<R>>>)[endpoint.id]
+  const generator = generatorFor(generators, endpoint)
   if (generator === undefined) return { kind: 'declined', why: 'no generator', facts: NO_FACTS }
   // [LAW:no-silent-failure] A generator that throws is the mock's own bug: a 500 that names it.
   try {
