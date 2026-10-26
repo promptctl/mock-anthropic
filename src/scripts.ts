@@ -35,7 +35,8 @@ const MessageReply = z
   )
 // [LAW:parse-dont-validate] A literal reply is one a Response can carry, checked when the script is
 // read so the error names the script: the Fetch standard's own Headers check, and an empty body on a
-// status that has none (RFC 9110 15.3.5, 15.3.6, 15.4.5).
+// status that has none (RFC 9110 15.3.5, 15.3.6, 15.4.5), which parses to no body at all (null), so
+// the response carries none and no Content-Length (RFC 9110 8.6).
 const NULL_BODY_STATUSES = new Set([204, 205, 304])
 const LiteralReply = z
   .strictObject({
@@ -59,6 +60,7 @@ const LiteralReply = z
     message: 'a 204, 205 or 304 has no body',
     path: ['body'],
   })
+  .transform(reply => ({ ...reply, body: NULL_BODY_STATUSES.has(reply.status) ? null : reply.body }))
 const ReplySchema = z.discriminatedUnion('kind', [MessageReply, LiteralReply])
 
 export type Reply = z.output<typeof ReplySchema>
@@ -95,8 +97,8 @@ export function firstReply(scripts: readonly Script[], request: MessagesRequest)
 // [LAW:one-source-of-truth] The one place the order is written: consumer directories in the order
 // given, then the built-ins. Directories are read on every call, so a script written after the mock
 // started answers the next request.
-export async function selectReply(dirs: readonly string[], builtIns: readonly Script[], request: MessagesRequest): Promise<Selection> {
-  return firstReply([...(await readScripts(dirs)), ...builtIns], request)
+export async function scriptsInOrder(dirs: readonly string[], builtIns: readonly Script[]): Promise<Script[]> {
+  return [...(await readScripts(dirs)), ...builtIns]
 }
 
 const SCRIPT_SUFFIX = '.json'

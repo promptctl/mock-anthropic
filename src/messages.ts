@@ -26,20 +26,24 @@ const Message = z.object({ role: z.enum(['user', 'assistant']), content: Content
 
 // Claude Code sends many fields no part of the mock reads, and zod drops keys a schema does not name,
 // so here and in every block above only what is read is declared. A field that a generator reads is
-// added here, typed, so the body is still parsed once.
-const MessagesBody = z.object({ messages: z.array(Message).min(1) }).transform((body, ctx) => {
-  // [LAW:parse-dont-validate] The last user message is a parsed fact: a body with none is not a
-  // request a script can be matched against, so it fails here and never reaches one.
-  const lastUser = body.messages.findLast(message => message.role === 'user')
-  if (lastUser === undefined) {
-    ctx.addIssue({ code: 'custom', message: 'has no user message', path: ['messages'] })
-    return z.NEVER
-  }
-  return { lastUserTexts: lastUser.content }
-})
+// added here, typed, so the body is still parsed once. `model` is required and `stream` defaults to
+// false, as the API has them.
+const MessagesBody = z
+  .object({ model: z.string().min(1), stream: z.boolean().default(false), messages: z.array(Message).min(1) })
+  .transform((body, ctx) => {
+    // [LAW:parse-dont-validate] The last user message is a parsed fact: a body with none is not a
+    // request a script can be matched against, so it fails here and never reaches one.
+    const lastUser = body.messages.findLast(message => message.role === 'user')
+    if (lastUser === undefined) {
+      ctx.addIssue({ code: 'custom', message: 'has no user message', path: ['messages'] })
+      return z.NEVER
+    }
+    return { model: body.model, stream: body.stream, lastUserTexts: lastUser.content }
+  })
 
 // `raw` is the body as sent, for matching anywhere in it; `lastUserTexts` are the texts of the last
-// `user` message, the current turn, apart from the same words earlier in the conversation.
+// `user` message, the current turn, apart from the same words earlier in the conversation; `model`
+// and `stream` say what to answer as and how.
 export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
 
 // A body that is not a Messages request is the generator's to decline, with the reason.

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
-import { type Reply, type Script, type Selection, readScripts, selectReply } from './scripts.ts'
+import { firstReply, type Reply, readScripts, type Script, type Selection, scriptsInOrder } from './scripts.ts'
 
 const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-scripts-'))
 afterAll(() => rm(root, { recursive: true, force: true }))
@@ -29,6 +29,11 @@ function request(...messages: { role: 'user' | 'assistant'; content: unknown }[]
 }
 
 const HELLO = request({ role: 'user', content: 'hello' })
+
+// The selection the Messages generator makes: the scripts in order, then the first that answers.
+async function selectReply(dirs: readonly string[], builtIns: readonly Script[], request: MessagesRequest): Promise<Selection> {
+  return firstReply(await scriptsInOrder(dirs, builtIns), request)
+}
 
 function says(text: string, match: Record<string, string[]> = {}) {
   return { match, reply: { kind: 'message', content: [{ type: 'text', text }], stop_reason: 'end_turn' } }

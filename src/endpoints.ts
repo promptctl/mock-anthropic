@@ -189,7 +189,8 @@ const ROWS = [
   outOfScope('code-trigger-run', API, 'POST', '/v1/code/triggers/{trigger_id}/run', TRIGGERS),
 ]
 
-type Row = (typeof ROWS)[number]
+// A row of the real table: what the mock's own generators are keyed and typed by.
+export type Row = (typeof ROWS)[number]
 export type EndpointId = Row['id']
 export type InScopeId = Extract<Row, { scope: 'in-scope' }>['id']
 
