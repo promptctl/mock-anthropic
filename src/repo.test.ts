@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import pkg from '../package.json' with { type: 'json' }
@@ -123,9 +123,9 @@ function nulSeparated(output: Buffer): string[] {
   return output.toString('utf8').split('\0').filter(entry => entry !== '')
 }
 
-// The files on disk a commit would take: tracked or untracked-and-not-ignored, minus deletions not
-// yet committed. Read as git would record them: a symlink as its target, and a directory (a
-// nested repository, which `git add` records as a gitlink) as a path with no text.
+// The files on disk `git add --all` would take: tracked or untracked-and-not-ignored, minus
+// deletions not yet committed. Read as git would record them: a symlink as its target, and a
+// directory (a nested repository, which `git add` records as a gitlink) as a path with no text.
 async function workingTreeSources(repo: Repo): Promise<Source[]> {
   const listed = nulSeparated(
     await git(repo, ['ls-files', '-z', '--deduplicate', '--cached', '--others', '--exclude-standard']),
@@ -353,6 +353,16 @@ describe('readSources', () => {
     run(root, 'rm', '-q', 'src/leak.ts')
     run(root, 'commit', '-q', '-m', 'unleak')
     expect(findLeaks(await scan(root))).toEqual([`${leaked} src/leak.ts:1: ${leak}`])
+  })
+
+  test('reads a symlink as its target and skips a tracked file deleted on disk', async () => {
+    const root = await repo('disk')
+    await Bun.write(join(root, 'src/gone.ts'), '')
+    run(root, 'add', '.')
+    run(root, 'commit', '-q', '-m', 'gone')
+    await rm(join(root, 'src/gone.ts'))
+    await symlink(foreign, join(root, 'src/link.ts'))
+    expect(findLeaks(await scan(root))).toEqual([`working tree src/link.ts:1: ${leak}`])
   })
 
   test('finds a leak in a commit message', async () => {
