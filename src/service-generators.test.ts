@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { DEFAULT_ACCOUNT } from './account.ts'
+import { DEFAULT_ACCOUNT, syntheticUuid } from './account.ts'
 import type { Method } from './endpoints.ts'
 import { mockGenerators } from './generators.ts'
 import { scriptDirectories, send as sendTo } from './testing.ts'
@@ -7,6 +7,14 @@ import { scriptDirectories, send as sendTo } from './testing.ts'
 const { directory } = await scriptDirectories('service-generators')
 
 const API = 'https://api.anthropic.com'
+// 2.1.289's error tracking query, its parameters as the client builds them and synthetic values.
+const ERROR_TRACKING_QUERY = new URLSearchParams({
+  ddsource: 'browser',
+  'dd-api-key': 'pub-synthetic',
+  'dd-evp-origin': 'browser',
+  'dd-evp-origin-version': '2.1.289',
+  'dd-request-id': syntheticUuid(1),
+})
 const send = (method: Method, url: string, body = '') => sendTo(mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] }), method, url, body)
 
 // What Claude Code sends, as far as the answer depends on it.
@@ -18,7 +26,7 @@ const ANSWERS: readonly { name: string; method: Method; url: string; body?: stri
   {
     name: 'Datadog error tracking',
     method: 'POST',
-    url: 'https://browser-intake-us5-datadoghq.com/api/v2/logs?ddsource=browser&dd-evp-origin=browser',
+    url: `https://browser-intake-us5-datadoghq.com/api/v2/logs?${ERROR_TRACKING_QUERY}`,
     body: '[]',
     status: 200,
     type: 'application/json',

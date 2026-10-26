@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { DEFAULT_ACCOUNT } from './account.ts'
 import {
   buildEndpointTable,
+  CLAUDE_CODE_2_1_289_ADDITIONS,
   ENDPOINT_TABLE,
   type EndpointRow,
   type InScopeId,
@@ -160,14 +161,13 @@ describe('resolveEndpoint over the endpoint table', () => {
   })
 })
 
-test('every endpoint PROJECT.md says 2.1.289 also calls is an in-scope row', async () => {
+test("the endpoints PROJECT.md says 2.1.289 also calls are exactly the table's 2.1.289 additions", async () => {
   const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
   const section = doc.split('\nClaude Code 2.1.289 also calls')[1]?.split('\n### ')[0] ?? ''
   // A bullet that does not open with a `METHOD host/path` is kept whole, so it fails the match below.
   const listed = [...section.matchAll(/^- (.*)$/gm)].map(([, bullet = '']) => /^`([A-Z]+ [^`]+)`/.exec(bullet)?.[1] ?? bullet)
-  const inScope = ENDPOINT_TABLE.endpoints.filter(e => e.scope === 'in-scope').map(e => `${e.method} ${e.host}${e.path}`)
-  expect(listed).not.toBeEmpty()
-  for (const endpoint of listed) expect(inScope).toContain(endpoint)
+  const added = CLAUDE_CODE_2_1_289_ADDITIONS.map(e => `${e.method} ${e.host}${e.path}`)
+  expect(listed.toSorted()).toEqual(added.toSorted())
 })
 
 describe('buildEndpointTable', () => {
