@@ -14,18 +14,15 @@ export const CERTS_DIR = fileURLToPath(new URL('../certs', import.meta.url))
 export type Outcome = 'generated' | 'reused'
 
 export type Certificates = {
-  readonly ca: { readonly certPath: string; readonly outcome: Outcome }
+  readonly ca: { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
   readonly leaf: { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
 }
-
 
 // What each certificate is built from: openssl.cnf, then each command, run in the certificate's own
 // directory. The leaf's signing command also gets the CA and a serial, which are not part of its recipe.
 const KEY = 'rsa:2048'
 const DAYS = '3650'
-const CA_STEPS = [
-  ['req', '-x509', '-newkey', KEY, '-nodes', '-days', DAYS, '-config', 'openssl.cnf', '-extensions', 'ca', '-keyout', 'key.pem', '-out', 'cert.pem'],
-]
+const CA_REQUEST = ['req', '-x509', '-newkey', KEY, '-nodes', '-days', DAYS, '-config', 'openssl.cnf', '-extensions', 'ca', '-keyout', 'key.pem', '-out', 'cert.pem']
 const LEAF_REQUEST = ['req', '-new', '-newkey', KEY, '-nodes', '-config', 'openssl.cnf', '-keyout', 'key.pem', '-out', 'request.csr']
 const LEAF_SIGN = ['x509', '-req', '-in', 'request.csr', '-days', DAYS, '-extfile', 'openssl.cnf', '-extensions', 'leaf', '-out', 'cert.pem']
 
@@ -113,20 +110,23 @@ async function generate(scratch: string, config: string, steps: readonly (readon
   await chmod(join(scratch, 'key.pem'), 0o600)
 }
 
+// Where a published certificate directory keeps the files the openssl steps write.
+const files = (path: string) => ({ certPath: join(path, 'cert.pem'), keyPath: join(path, 'key.pem') })
+
 // [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's recipe
 // holds the CA's fingerprint, so a replaced CA gets a new leaf too.
 export async function ensureCertificates(dir: string, hosts: readonly string[]): Promise<Certificates> {
   await mkdir(dir, { recursive: true })
-  const ca = await publish(dir, 'ca', [CA_CONFIG, ...CA_STEPS.flat()], scratch => generate(scratch, CA_CONFIG, CA_STEPS))
-  const caCert = join(ca.path, 'cert.pem')
-  const fingerprint = new X509Certificate(await Bun.file(caCert).text()).fingerprint256
+  const ca = await publish(dir, 'ca', [CA_CONFIG, ...CA_REQUEST], scratch => generate(scratch, CA_CONFIG, [CA_REQUEST]))
+  const caFiles = files(ca.path)
+  const fingerprint = new X509Certificate(await Bun.file(caFiles.certPath).text()).fingerprint256
   const config = leafConfig(hosts)
-  const sign = [...LEAF_SIGN, '-CA', caCert, '-CAkey', join(ca.path, 'key.pem'), '-set_serial', `0x${randomBytes(16).toString('hex')}`]
+  const sign = [...LEAF_SIGN, '-CA', caFiles.certPath, '-CAkey', caFiles.keyPath, '-set_serial', `0x${randomBytes(16).toString('hex')}`]
   const leaf = await publish(dir, 'leaf', [fingerprint, config, ...LEAF_REQUEST, ...LEAF_SIGN], scratch =>
     generate(scratch, config, [LEAF_REQUEST, sign]),
   )
   return {
-    ca: { certPath: caCert, outcome: ca.outcome },
-    leaf: { certPath: join(leaf.path, 'cert.pem'), keyPath: join(leaf.path, 'key.pem'), outcome: leaf.outcome },
+    ca: { ...caFiles, outcome: ca.outcome },
+    leaf: { ...files(leaf.path), outcome: leaf.outcome },
   }
 }

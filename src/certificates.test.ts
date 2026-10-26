@@ -28,17 +28,17 @@ async function sans(certs: Certificates): Promise<string[]> {
   return names.split(', ').map(name => name.replace(/^DNS:/, ''))
 }
 
-// Whether a client that trusts only the CA accepts the leaf as `host`, as Claude Code does with
-// NODE_EXTRA_CA_CERTS.
-async function handshake(certs: Certificates, host: string): Promise<boolean> {
+// Resolves when a client that trusts only the CA accepts the leaf as `host`, as Claude Code does with
+// NODE_EXTRA_CA_CERTS, and rejects with the client's error otherwise.
+async function handshake(certs: Certificates, host: string): Promise<void> {
   const [cert, key, ca] = await Promise.all([read(certs.leaf.certPath), read(certs.leaf.keyPath), read(certs.ca.certPath)])
   const server = tls.createServer({ cert, key }, socket => socket.end())
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as { port: number }
   try {
-    return await new Promise<boolean>((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const socket = tls.connect({ host: '127.0.0.1', port, servername: host, ca }, () => {
-        resolve(socket.authorized)
+        resolve()
         socket.end()
       })
       socket.on('error', reject)
@@ -66,8 +66,7 @@ describe('ensureCertificates', async () => {
   })
 
   test('a client trusting only the CA accepts the leaf for every host in the table', async () => {
-    const accepted = await Promise.all(ENDPOINT_HOSTS.map(host => handshake(first, host)))
-    expect(accepted).toEqual(ENDPOINT_HOSTS.map(() => true))
+    await Promise.all(ENDPOINT_HOSTS.map(host => handshake(first, host)))
   })
 
   test('a client rejects the leaf for a host outside the table', async () => {
@@ -96,8 +95,7 @@ describe('ensureCertificates', async () => {
   })
 
   test('the keys, and the directories holding them, are their owner\'s alone', async () => {
-    const caKey = join(first.ca.certPath, '..', 'key.pem')
-    const paths = [caKey, join(caKey, '..'), first.leaf.keyPath, join(first.leaf.keyPath, '..')]
+    const paths = [first.ca.keyPath, dirname(first.ca.keyPath), first.leaf.keyPath, dirname(first.leaf.keyPath)]
     const modes = await Promise.all(paths.map(async path => (await stat(path)).mode & 0o077))
     expect(modes).toEqual([0, 0, 0, 0])
   })
