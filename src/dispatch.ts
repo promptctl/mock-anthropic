@@ -28,6 +28,9 @@ export type Answer = (
   | { readonly kind: 'declined'; readonly why: string }
 ) & { readonly facts: Facts }
 
+// The answer most generators give: a JSON body, with what was decided to reach it.
+export const answer = (body: Json, facts: Facts): Answer => ({ kind: 'response', response: Response.json(body), facts })
+
 export type Generator<R extends EndpointRow> = (resolution: Resolution<R>, request: MockRequest) => Answer | Promise<Answer>
 
 // [LAW:types-are-the-program] Keyed by in-scope id only, so no generator can be written for a refused

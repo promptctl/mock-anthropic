@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Account } from './account.ts'
-import type { Answer, Facts, Generator, Generators, Json } from './dispatch.ts'
+import { type Answer, answer, type Facts, type Generator, type Generators, type Json } from './dispatch.ts'
 import type { Row } from './endpoints.ts'
 import { parseJsonBody } from './json-body.ts'
 import { ACCESS_TOKEN, OAUTH_SCOPES, REFRESH_TOKEN, TOKEN_LIFETIME_SECONDS } from './oauth.ts'
@@ -9,8 +9,6 @@ import { ACCESS_TOKEN, OAUTH_SCOPES, REFRESH_TOKEN, TOKEN_LIFETIME_SECONDS } fro
 // organization-scoped paths. [LAW:one-source-of-truth] Every identity in their bodies is the account's.
 // Each body is the least both Claude Code builds in use accept: 2.1.88 (its source) and 2.1.289 (its
 // shipped binary). Fields neither reads are left out.
-
-const answer = (body: Json, facts: Facts): Answer => ({ kind: 'response', response: Response.json(body), facts })
 
 // [LAW:nothing-unseen] The identity an answer was built from, for its record.
 const identity = (account: Account): Facts => ({ account_uuid: account.accountUuid, organization_uuid: account.organizationUuid })
@@ -40,11 +38,11 @@ function forOrganization(account: Account, org: string, body: Json): Answer {
 }
 
 // [LAW:types-are-the-program] The in-scope rows whose path names an organization. They are given
-// bodies, never generators, so no answer to one can skip forOrganization.
+// bodies, never generators, so no answer to one can skip forOrganization; every one of them has a body.
 type OrganizationRow = Extract<Row, { scope: 'in-scope'; path: `${string}{org}${string}` }>
-type OrganizationBodies = { readonly [Id in OrganizationRow['id']]?: Json }
+type OrganizationBodies = { readonly [Id in OrganizationRow['id']]: Json }
 
-export function organizationGenerators(account: Account): Generators<OrganizationRow> {
+export function organizationGenerators(account: Account): Required<Generators<OrganizationRow>> {
   const bodies: OrganizationBodies = {
     'organization-skills': { skills: [] },
     // No `cc` selector config, so 2.1.289 caches no model catalog and offers its own models.
@@ -52,6 +50,10 @@ export function organizationGenerators(account: Account): Generators<Organizatio
     'organization-marketplaces': { marketplaces: [] },
     // 2.1.289 asks for the next page while `has_more` is true.
     'organization-plugins': { plugins: [], has_more: false },
+    // No guest passes and no referrer reward, so no referral surface is offered.
+    'referral-eligibility': { eligible: false, referral_code_details: null, referrer_reward: null, remaining_passes: null },
+    // No grant to claim, so no extra-usage upsell is offered.
+    'overage-credit-grant': { available: false, eligible: false, granted: false, amount_minor_units: null, currency: null },
   }
   const generators = Object.entries(bodies).map(([id, body]) => {
     const generator: Generator<OrganizationRow> = ({ params }) => forOrganization(account, params.org, body)
@@ -59,7 +61,7 @@ export function organizationGenerators(account: Account): Generators<Organizatio
   })
   // Every key is an OrganizationRow id, which Object.fromEntries cannot carry; this cast is the one
   // place that says so. The generator itself is checked against every organization row's params.
-  return Object.fromEntries(generators) as Generators<OrganizationRow>
+  return Object.fromEntries(generators) as Required<Generators<OrganizationRow>>
 }
 
 // What a token request asks for, read loosely so that a refusal can say what was asked.
@@ -85,9 +87,9 @@ function refusal(grant_type: string, token: RefreshTokenKind): string | null {
   }
 }
 
-// The rows answered here: neither an organization-scoped row nor Messages can be given a generator in
-// this map, so none can skip forOrganization or stand in for the Messages generator.
-type AccountRow = Exclude<Row, OrganizationRow | Extract<Row, { id: 'messages' }>>
+// The rows a plain generator may answer: neither an organization-scoped row nor Messages can be given
+// one, so none can skip forOrganization or stand in for the Messages generator.
+export type PlainRow = Exclude<Row, OrganizationRow | Extract<Row, { id: 'messages' }>>
 
 export function accountGenerators(account: Account) {
   return {
@@ -162,5 +164,5 @@ export function accountGenerators(account: Account) {
         },
         identity(account),
       ),
-  } satisfies Generators<AccountRow>
+  } satisfies Generators<PlainRow>
 }

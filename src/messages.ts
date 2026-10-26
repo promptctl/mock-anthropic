@@ -31,16 +31,13 @@ const System = z.union([z.string().transform(text => [text]), z.array(z.object({
 
 // Claude Code sends many fields no part of the mock reads, and zod drops keys a schema does not name,
 // so here and in every block above only what is read is declared. A field that a generator reads is
-// added here, typed, so the body is still parsed once. `model` and `max_tokens` are required, `stream`
-// defaults to false, and `system` to none, as the API has them.
-const MessagesBody = z
-  .object({
-    model: z.string().min(1),
-    max_tokens: z.int().positive(),
-    stream: z.boolean().default(false),
-    system: System.default([]),
-    messages: z.array(Message).min(1),
-  })
+// added here, typed, so the body is still parsed once. `model` is required, and `system` defaults to
+// none, as the API has them. [LAW:one-source-of-truth] The base is what a Messages request and a
+// token count request share, so the two endpoints refuse the same messages for the same reason.
+const RequestBase = z.object({ model: z.string().min(1), system: System.default([]), messages: z.array(Message).min(1) })
+
+// `max_tokens` is required and `stream` defaults to false, as the API has them.
+const MessagesBody = RequestBase.extend({ max_tokens: z.int().positive(), stream: z.boolean().default(false) })
   .transform((body, ctx) => {
     // [LAW:parse-dont-validate] The last user message is a parsed fact: a body with none is not a
     // request a script can be matched against, so it fails here and never reaches one.
@@ -62,4 +59,13 @@ export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeo
 export function parseMessagesRequest(raw: string): ParsedBody<MessagesRequest> {
   const body = parseJsonBody(raw, MessagesBody, 'a Messages request')
   return body.kind === 'parsed' ? { kind: 'parsed', value: { raw, ...body.value } } : body
+}
+
+// `POST /v1/messages/count_tokens`: the base alone. No script is matched against it, so it needs no
+// last user message; it is counted, from `raw`, as a Messages request's input is.
+export type CountTokensRequest = { readonly raw: string }
+
+export function parseCountTokensRequest(raw: string): ParsedBody<CountTokensRequest> {
+  const body = parseJsonBody(raw, RequestBase, 'a token count request')
+  return body.kind === 'parsed' ? { kind: 'parsed', value: { raw } } : body
 }
