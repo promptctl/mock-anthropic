@@ -52,7 +52,12 @@ A consumer supplies a directory of script files. Each file says which Messages r
 
 ### Recordings
 
-The mock is a record/replay request server. In record mode it forwards each request to the real host and saves the exchange. In replay mode it answers matching requests from saved exchanges.
+The mock is a record/replay request server. In record mode it forwards each request to the real host, using the recording user's real login, and saves the exchange. In replay mode it answers matching requests from saved exchanges.
+
+- **Scrubbing**: before an exchange is saved, every token, account UUID, organization UUID, and email in it is replaced with the corresponding value from the account input. A saved recording carries no real credential or identifier.
+- **Location**: recordings belong to the consumer and live beside its tests. This repository holds none.
+- **Matching**: a replayed Messages request matches a recorded one by its position in the conversation, its last user message, and its tool results. The system prompt, session IDs, timestamps, and request metadata are ignored, because they vary between runs and between Claude Code versions.
+- **Scope**: replay answers the conversations under test. The startup and account endpoints (OAuth, bootstrap, feature flags, telemetry, and the rest) are answered by generators, not by recordings.
 
 ## What the mock generates
 
@@ -115,7 +120,8 @@ Every invocation ends with one line on stderr recording it, in the same form as 
 
 - `serve [--port N] [--scenarios DIR]... [--account FILE]`: start the mock. Port 0 picks a free port. `--account` replaces the default account with the one in FILE. Once listening, it prints exactly one JSON line on stdout, `{"port": N, "ca": "<path to CA certificate>"}`, and writes human-readable logs on stderr. It runs until SIGINT, SIGTERM or SIGHUP, then closes every connection and exits 0; a second signal while it is closing ends it at once, as `FAILED`.
 - `login <config-dir> [--trust <project-dir>]... [--account FILE]`: write a Claude Code config directory that the mock accepts as logged in. It holds an OAuth credentials file with the mock's token and scopes, the account, completed onboarding, and the given projects marked trusted, each under its real path. `--account` is as for `serve`. This is the one place that defines what a mock login looks like; consumers call it instead of writing those files themselves. A login into a directory that already holds one replaces both files whole and removes what Claude Code would read ahead of them: a legacy `.config.json` in the directory, and on macOS the keychain entry Claude Code keeps for that directory. The consumer sets `CLAUDE_CONFIG_DIR` to exactly the path `login` records, because Claude Code names that keychain entry after the string, and leaves `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset: Claude Code reads both the keychain entry and the credentials file from the directory it names instead.
-- `coverage`: as described under Endpoint table.
+- `env --port N --ca FILE --config-dir DIR`: print, one `NAME=value` per line, the environment variables that point a Claude Code instance at a running mock: the proxy variables, `NODE_EXTRA_CA_CERTS`, and `CLAUDE_CONFIG_DIR`. Variables that would route an instance around the mock or replace its login (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, the `CLAUDE_CODE_USE_*` provider switches, `NO_PROXY`) must be unset in that instance; the mock does not launch it and cannot unset them.
+- `coverage`: as described under Endpoint table. Run against a new Claude Code version's traffic, it shows which calls nothing answers yet.
 
 ## Consumers
 
