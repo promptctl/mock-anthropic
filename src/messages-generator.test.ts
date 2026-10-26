@@ -86,7 +86,7 @@ describe('the Messages generator', () => {
     expect(facts).toEqual({ scripts_tried: [] })
   })
 
-  test('declines a body that is not a Messages request with the reason, having consulted no script', async () => {
+  test('declines a body that is not a Messages request with the reason, having matched no script', async () => {
     const dir = await directory({ 'any.json': RATE_LIMITED })
     const { verdict, facts } = await send([dir], '', { raw: '{"messages": "nope"' })
     expect(verdict).toMatchObject({ outcome: 'unmatched', why: expect.stringMatching(/^body is not JSON: /) })
@@ -99,5 +99,12 @@ describe('the Messages generator', () => {
     expect(verdict).toMatchObject({ outcome: 'failed', why: expect.stringContaining(join(dir, 'b.json')) })
     expect(response.status).toBe(500)
     expect(facts).toEqual({})
+  })
+
+  test('a bad script fails a request whose body is not a Messages request too', async () => {
+    const dir = await directory({ 'b.json': '{ not json' })
+    const { verdict, response } = await send([dir], '', { raw: '{"messages": "nope"' })
+    expect(verdict).toMatchObject({ outcome: 'failed', why: expect.stringContaining(join(dir, 'b.json')) })
+    expect(response.status).toBe(500)
   })
 })

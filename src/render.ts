@@ -5,7 +5,8 @@ import type { MessageReply, Reply } from './scripts.ts'
 
 // PROJECT.md "Messages": a script's reply as the response the request asked for. A message reply is
 // rendered as the Messages API sends an assistant turn, streamed or as one JSON message; a literal
-// reply is sent as written.
+// reply is sent as written, except that one naming no content-type gets the one Bun.serve gives every
+// body (text/plain for a string).
 
 type StopReason = MessageReply['stop_reason']
 
@@ -62,8 +63,9 @@ type AssistantMessage = {
 }
 
 // [LAW:types-are-the-program] Every id is a function of the raw body alone: the same request gets the
-// same ids in every run, and different requests get different ones, with no counter to keep. The
-// parts are joined by NUL, which a JSON body cannot hold unescaped, so no two part lists hash alike.
+// same ids in every run, and different requests get different ones, with no counter to keep. The body
+// is hashed once; each block's id hashes that digest with the block's type and index, joined by NUL,
+// which none of them holds, so no two part lists hash alike.
 function digest(...parts: string[]): string {
   return createHash('sha256').update(parts.join('\0')).digest('hex')
 }
@@ -71,18 +73,19 @@ function digest(...parts: string[]): string {
 const ID_HEX = 24
 
 function assistantMessage(reply: MessageReply, request: MessagesRequest): AssistantMessage {
+  const requestDigest = digest(request.raw)
   const content = reply.content.map((block, index): ContentBlock => {
     switch (block.type) {
       case 'text':
         return block
       case 'tool_use':
-        return { type: 'tool_use', id: `toolu_${digest(request.raw, 'tool_use', String(index)).slice(0, ID_HEX)}`, name: block.name, input: block.input }
+        return { type: 'tool_use', id: `toolu_${digest(requestDigest, 'tool_use', String(index)).slice(0, ID_HEX)}`, name: block.name, input: block.input }
       case 'thinking':
-        return { type: 'thinking', thinking: block.thinking, signature: Buffer.from(digest(request.raw, 'thinking', String(index)), 'hex').toString('base64') }
+        return { type: 'thinking', thinking: block.thinking, signature: Buffer.from(digest(requestDigest, 'thinking', String(index)), 'hex').toString('base64') }
     }
   })
   return {
-    id: `msg_${digest(request.raw).slice(0, ID_HEX)}`,
+    id: `msg_${requestDigest.slice(0, ID_HEX)}`,
     type: 'message',
     role: 'assistant',
     model: request.model,

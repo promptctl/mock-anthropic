@@ -97,8 +97,8 @@ export function firstReply(scripts: readonly Script[], request: MessagesRequest)
 // [LAW:one-source-of-truth] The one place the order is written: consumer directories in the order
 // given, then the built-ins. Directories are read on every call, so a script written after the mock
 // started answers the next request.
-export async function selectReply(dirs: readonly string[], builtIns: readonly Script[], request: MessagesRequest): Promise<Selection> {
-  return firstReply([...(await readScripts(dirs)), ...builtIns], request)
+export async function scriptsInOrder(dirs: readonly string[], builtIns: readonly Script[]): Promise<Script[]> {
+  return [...(await readScripts(dirs)), ...builtIns]
 }
 
 const SCRIPT_SUFFIX = '.json'
