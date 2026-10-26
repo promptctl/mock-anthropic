@@ -283,7 +283,7 @@ func plainHost(target string) string {
 		return endpoint.API
 	}
 	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
-		return endpoint.CanonicalHost(u.Host)
+		return endpoint.CanonicalHost(u.Hostname())
 	}
 	return target
 }
@@ -591,8 +591,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// [LAW:types-are-the-program] Every request in a tunnel is addressed to the tunnel's authority, and
 	// every plain one to the host its target names; the URL is built from that, so the Host header
-	// cannot choose the host. A plain request for any host but the API is refused, as its connection's
-	// first one would have been.
+	// cannot choose the host. A later plain request for any host but the API is answered Unmatched, a
+	// 400 on its own record; only a connection's first request decides the connection, as a 403.
 	authority := sc.kind.authority
 	if sc.kind.tunnel == nil {
 		authority = plainHost(r.RequestURI)
@@ -602,7 +602,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u := &url.URL{Scheme: "https", Host: authority, Path: path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery}
 	resolution, miss := s.table.Resolve(r.Method, authority, u.EscapedPath())
 	var id *endpoint.ID
-	if miss == nil {
+	// A request for a host the connection does not answer was addressed to no endpoint of it.
+	if miss == nil && authority == sc.kind.authority {
 		e := resolution.Endpoint.ID()
 		id = &e
 	}
@@ -612,8 +613,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &request{emit: s.emit, event: RequestEvent{Event: "request", Tunnel: sc.kind.tunnel, Host: u.Hostname(), Method: r.Method, Path: u.EscapedPath(), Query: query, Endpoint: id, Facts: generator.Facts{}}, started: started}
 	req := generator.Request{Method: r.Method, URL: u, Header: r.Header}
-	// status is the one sent once answered: a panic after it is recorded with it, not with a 500.
+	// status is the one sent once answered: a panic after it is recorded with it, not with a 500, and
+	// with the facts of the answer it broke.
 	status, answered := 0, false
+	d := dispatch.Dispatched{Facts: generator.Facts{}}
 	// A Handler that panics is the mock's own bug: a 500 that names it, or, once the response has
 	// begun, a cut connection.
 	defer func() {
@@ -626,44 +629,43 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		why := fmt.Sprintf("the mock failed: %v", p)
 		if answered {
-			rec.record(&status, nil, RequestFailed, why)
+			rec.record(&status, d.Facts, RequestFailed, why)
 			panic(http.ErrAbortHandler)
 		}
 		failure := dispatch.ErrorResponse(dispatch.Failure, req, why)
 		rec.record(&failure.Status, nil, RequestFailed, why)
-		for k, vs := range failure.Header {
-			w.Header()[k] = vs
-		}
-		w.WriteHeader(failure.Status)
+		writeHeader(w, failure)
 		io.Copy(w, failure.Body) //nolint:errcheck // the record is written; a client gone now changes nothing
 	}()
 
+	// Every early end cuts the connection: a handler that writes nothing would have net/http send an
+	// empty 200 for it.
 	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		rec.record(nil, nil, Aborted, endedEarly(sc.client.endedBy(), bodyCutOff))
-		return
-	}
 	req.Body = body
-	d := dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Unmatched, Why: plainOnly}, Response: dispatch.ErrorResponse(dispatch.Refusal, req, plainOnly), Facts: generator.Facts{}}
-	if authority == sc.kind.authority {
+	switch by := sc.client.endedBy(); {
+	case err != nil && by != ByServer:
+		rec.record(nil, nil, Aborted, endedEarly(by, bodyCutOff))
+		panic(http.ErrAbortHandler)
+	case err != nil:
+		// The client is still there: it sent a body net/http cannot read, such as a malformed chunk.
+		d = dispatch.Refuse(req, fmt.Sprintf("request body unreadable: %v", err), generator.Facts{})
+	case authority != sc.kind.authority:
+		d = dispatch.Refuse(req, plainOnly, generator.Facts{})
+	default:
 		d = s.handle(r.Context(), resolution, miss, req)
 	}
 	if r.Context().Err() != nil {
 		rec.record(nil, d.Facts, Aborted, endedEarly(sc.client.endedBy(), notReady))
-		return
+		panic(http.ErrAbortHandler)
 	}
 	// [LAW:single-enforcer] Every Handler's response passes here, so a response the server cannot
 	// write is caught here, before its status is committed: the mock's own bug, a 500 that names it.
 	if why := unwritable(d.Response); why != "" {
 		why = "the handler gave " + why
-		d = dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Failed, Why: why}, Response: dispatch.ErrorResponse(dispatch.Failure, req, why), Facts: d.Facts}
+		d = dispatch.Fail(req, why, d.Facts)
 	}
-	status = d.Response.Status
-	for k, vs := range d.Response.Header {
-		w.Header()[k] = vs
-	}
-	answered = true
-	w.WriteHeader(status)
+	status, answered = d.Response.Status, true
+	writeHeader(w, d.Response)
 	// A response to HEAD has no body (RFC 9110 9.3.2): net/http refuses one, so none is delivered.
 	if r.Method == http.MethodHead {
 		rec.record(&status, d.Facts, RequestOutcome(d.Verdict.Outcome), d.Verdict.Why)
@@ -682,6 +684,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		rec.record(&status, d.Facts, RequestOutcome(d.Verdict.Outcome), d.Verdict.Why)
 	}
+}
+
+// writeHeader sends a response's status and headers, each key as net/http spells it (Header.Add
+// canonicalizes), so a Handler's lowercase content-type or content-length is the one net/http sees.
+func writeHeader(w http.ResponseWriter, r generator.Response) {
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(r.Status)
 }
 
 type delivery struct {

@@ -98,7 +98,10 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("nobodyallowed", endpoint.API, "GET", "/v1/nobodyallowed", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Response{Status: 204, Header: http.Header{}, Body: strings.NewReader("null")}, Facts: generator.Facts{}}, nil
 		}),
-		endpoint.InScope("panicsmidway", endpoint.API, "GET", "/v1/panicsmidway", streaming(func(context.Context) error { panic("midway") })),
+		endpoint.InScope("panicsmidway", endpoint.API, "GET", "/v1/panicsmidway", func(ctx context.Context, _ map[string]string, _ generator.Request) (generator.Answer, error) {
+			body := &streams{ctx: ctx, next: func(context.Context) error { panic("midway") }}
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"content-type": {"text/event-stream"}}, Body: body}, Facts: generator.Facts{"script": "x"}}, nil
+		}),
 		endpoint.InScope("breaks", endpoint.API, "GET", "/v1/breaks", streaming(func(context.Context) error { return errors.New("source broke") })),
 		endpoint.InScope("stalls", endpoint.API, "GET", "/v1/stalls", streaming(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })),
 		endpoint.InScope("waits", endpoint.API, "POST", "/v1/waits", waitsForCtx),
@@ -395,10 +398,13 @@ func TestAPanicAfterTheResponseBeganIsRecordedWithTheStatusSent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ct := res.Header.Values("Content-Type"); len(ct) != 1 || ct[0] != "text/event-stream" {
+		t.Errorf("a lowercase header key reaches the client as net/http spells it: %v", res.Header)
+	}
 	if body, err := io.ReadAll(res.Body); res.StatusCode != 200 || err == nil || string(body) != "first chunk\n" {
 		t.Errorf("client got %d %q, %v; want 200, the first chunk, and a broken stream", res.StatusCode, body, err)
 	}
-	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "the mock failed: midway" || *r.Status != 200 {
+	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "the mock failed: midway" || *r.Status != 200 || r.Facts["script"] != "x" {
 		t.Errorf("record %+v", r)
 	}
 }
@@ -423,7 +429,7 @@ func TestEachPlainRequestIsJudgedByItsHost(t *testing.T) {
 	h.request(t)
 	// The same keep-alive connection, now for another host the table knows.
 	res, body := do(t, c, "POST", "http://"+platform+"/v1/oauth/token", nil)
-	if r := h.request(t); res.StatusCode != 400 || !strings.Contains(body, plainOnly) || r.Host != platform || r.Outcome != Unmatched || r.Why != plainOnly {
+	if r := h.request(t); res.StatusCode != 400 || !strings.Contains(body, plainOnly) || r.Host != platform || r.Outcome != Unmatched || r.Why != plainOnly || r.Endpoint != nil {
 		t.Errorf("got %d %s, record %+v", res.StatusCode, body, r)
 	}
 	if res, _ := do(t, c, "GET", "http://api.anthropic.com", nil); res.StatusCode != 400 {
@@ -431,6 +437,30 @@ func TestEachPlainRequestIsJudgedByItsHost(t *testing.T) {
 	}
 	if r := h.request(t); r.Path != "/" {
 		t.Errorf("an empty path is /: %+v", r)
+	}
+}
+
+func TestAMalformedBodyFromAClientStillThereGetsA400(t *testing.T) {
+	h := start(t)
+	conn, err := net.Dial("tcp", h.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "POST /v1/ok HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\n")
+	if line, _ := bufio.NewReader(conn).ReadString('\n'); !strings.HasPrefix(line, "HTTP/1.1 400") {
+		t.Errorf("answered %q", line)
+	}
+	if r := h.request(t); r.Outcome != Unmatched || !strings.HasPrefix(r.Why, "request body unreadable: ") {
+		t.Errorf("record %+v", r)
+	}
+}
+
+func TestAnIPv6ConnectTargetKeepsItsHost(t *testing.T) {
+	h := start(t)
+	h.raw(t, "CONNECT [::1]:443 HTTP/1.1\r\n\r\n")
+	if e := h.connection(t); e.Host != "::1" || e.Outcome != Refused {
+		t.Errorf("record %+v", e)
 	}
 }
 

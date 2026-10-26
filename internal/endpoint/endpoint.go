@@ -247,11 +247,11 @@ func (t *Table) Hosts() []string { return slices.Clone(t.hosts) }
 // Knows is whether the table names host, given as CanonicalHost gives it.
 func (t *Table) Knows(host string) bool { return slices.Contains(t.hosts, host) }
 
-// CanonicalHost is the host an authority names, as the table names hosts: any case, any port, and a
-// trailing root dot all name the same host. [LAW:one-source-of-truth] Every comparison of a host with
-// the table's goes through it.
-func CanonicalHost(authority string) string {
-	return strings.TrimSuffix(strings.ToLower((&url.URL{Host: authority}).Hostname()), ".")
+// CanonicalHost is a host, without its port, as the table names hosts: any case and a trailing root
+// dot name the same host. [LAW:one-source-of-truth] Every comparison of a host with the table's goes
+// through it.
+func CanonicalHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 // Endpoints is every endpoint of the table, in table order.
@@ -292,7 +292,7 @@ func (m *Miss) Error() string { return m.why }
 // percent-decoded, then dot segments are removed as a WHATWG URL parser removes them, before it is
 // matched. The error is a *Miss when no endpoint matches.
 func (t *Table) Resolve(method, host, escapedPath string) (Resolution, error) {
-	host = CanonicalHost(host)
+	host = CanonicalHost((&url.URL{Host: host}).Hostname())
 	rest, ok := strings.CutPrefix(escapedPath, "/")
 	if !ok {
 		return Resolution{}, &Miss{NoEndpoint, fmt.Sprintf("no endpoint: path %q does not start with /", escapedPath)}

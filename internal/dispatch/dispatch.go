@@ -51,7 +51,7 @@ func Dispatch(ctx context.Context, resolution endpoint.Resolution, miss error, r
 	answer, err := decide(ctx, resolution, miss, r)
 	if err != nil {
 		// [LAW:no-silent-failure] A generator that fails is the mock's own bug: a 500 that names it.
-		return Dispatched{Verdict{Failed, err.Error()}, ErrorResponse(Failure, r, err.Error()), generator.Facts{}}
+		return Fail(r, err.Error(), generator.Facts{})
 	}
 	switch reply := answer.Reply.(type) {
 	case generator.Response:
@@ -60,14 +60,22 @@ func Dispatch(ctx context.Context, resolution endpoint.Resolution, miss error, r
 		// [LAW:no-silent-failure] A 400 that says nothing is no answer: a decline names why, or it is the
 		// generator's bug.
 		if reply.Why == "" {
-			why := fmt.Sprintf("generator %s declined without saying why", resolution.Endpoint.ID())
-			return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
+			return Fail(r, fmt.Sprintf("generator %s declined without saying why", resolution.Endpoint.ID()), answer.Facts)
 		}
-		return Dispatched{Verdict{Unmatched, reply.Why}, ErrorResponse(Refusal, r, reply.Why), answer.Facts}
+		return Refuse(r, reply.Why, answer.Facts)
 	default:
-		why := fmt.Sprintf("generator gave no reply (%T)", answer.Reply)
-		return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), answer.Facts}
+		return Fail(r, fmt.Sprintf("generator gave no reply (%T)", answer.Reply), answer.Facts)
 	}
+}
+
+// Refuse is a request answered Unmatched: a 400 that says why.
+func Refuse(r generator.Request, why string, facts generator.Facts) Dispatched {
+	return Dispatched{Verdict{Unmatched, why}, ErrorResponse(Refusal, r, why), facts}
+}
+
+// Fail is a request the mock failed: a 500 that says why.
+func Fail(r generator.Request, why string, facts generator.Facts) Dispatched {
+	return Dispatched{Verdict{Failed, why}, ErrorResponse(Failure, r, why), facts}
 }
 
 // The table's refusals are declines too: a request with no endpoint, an out-of-scope endpoint, and an
