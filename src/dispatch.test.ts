@@ -70,6 +70,15 @@ describe('dispatch', () => {
     })
   }
 
+  // A row's id is a key of the generators map; one every object inherits is not a generator by inheritance.
+  test('a row whose id every object inherits, such as toString, with no generator is a 400 naming no generator', async () => {
+    const table = buildEndpointTable([{ id: 'toString', host: API, method: 'GET', path: '/to-string', scope: 'in-scope' }] as const)
+    const sent = request('GET', '/to-string')
+    const { verdict, response } = await dispatch({}, resolveEndpoint(table, 'GET', sent.url), sent)
+    expect(verdict).toEqual({ outcome: 'unmatched', why: 'no generator' })
+    expect(response.status).toBe(400)
+  })
+
   for (const [path, why] of [
     ['/throws', 'generator broke'],
     ['/rejects', 'generator rejected'],
