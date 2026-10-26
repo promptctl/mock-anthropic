@@ -40,6 +40,9 @@ func read(t *testing.T, path string) []byte {
 func parse(t *testing.T, path string) *x509.Certificate {
 	t.Helper()
 	block, _ := pem.Decode(read(t, path))
+	if block == nil {
+		t.Fatalf("%s holds no PEM block", path)
+	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +165,17 @@ func TestFirstAndLaterStarts(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRelativeAndAbsoluteDirsNameOneLeaf(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	relative := ensure(t, "certs", hosts)
+	verify(t, relative)
+	absolute := ensure(t, filepath.Join(root, "certs"), hosts)
+	if absolute.Leaf.Outcome != Reused {
+		t.Fatalf("leaf through the absolute path: %s, want %s", absolute.Leaf.Outcome, Reused)
+	}
 }
 
 func TestTwoStartsAtOnceAgree(t *testing.T) {

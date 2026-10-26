@@ -77,8 +77,11 @@ var caRecipe = recipe{
 	Issue:  []string{"req", "-x509", "-newkey", keySpec, "-nodes", "-days", days, "-config", "openssl.cnf", "-extensions", "ca", "-keyout", "key.pem", "-out", "cert.pem"},
 }
 
-// leafRecipe is the leaf for hosts, signed by the CA whose files signer names.
+// leafRecipe is the leaf for hosts, signed by the CA whose files signer names. The signer is named
+// relative to the scratch directory, its sibling, so the recipe - and the leaf's name - does not
+// depend on where dir is or how its path is spelled.
 func leafRecipe(hosts []string, signer Issued) recipe {
+	signerDir := filepath.Join("..", filepath.Base(filepath.Dir(signer.CertPath)))
 	sans := make([]string, len(hosts))
 	for i, host := range hosts {
 		sans[i] = "DNS:" + host
@@ -98,7 +101,7 @@ subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid
 `,
 		Prepare: [][]string{{"req", "-new", "-newkey", keySpec, "-nodes", "-config", "openssl.cnf", "-keyout", "key.pem", "-out", "request.csr"}},
-		Issue:   []string{"x509", "-req", "-in", "request.csr", "-days", days, "-extfile", "openssl.cnf", "-extensions", "leaf", "-CA", signer.CertPath, "-CAkey", signer.KeyPath, "-out", "cert.pem"},
+		Issue:   []string{"x509", "-req", "-in", "request.csr", "-days", days, "-extfile", "openssl.cnf", "-extensions", "leaf", "-CA", filepath.Join(signerDir, filepath.Base(signer.CertPath)), "-CAkey", filepath.Join(signerDir, filepath.Base(signer.KeyPath)), "-out", "cert.pem"},
 	}
 }
 
