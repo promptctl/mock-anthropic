@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import net from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,8 +24,42 @@ async function finished(child: Bun.Subprocess<'ignore', 'pipe', 'pipe'>, stdout:
   return { exit, stdout: out, stderr, record }
 }
 
+// Every child a test starts is killed when the test ends, so one whose assertions failed partway leaves
+// no server listening behind it.
+const children = new Set<Bun.Subprocess>()
+afterEach(() => {
+  for (const child of children) child.kill('SIGKILL')
+  children.clear()
+})
+
 function spawn(command: readonly string[]) {
-  return Bun.spawn(['bun', ...command], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn(['bun', ...command], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  children.add(child)
+  return child
+}
+
+// `child`'s stdout read a line at a time, then the rest of it whole.
+function stdoutLines(child: Bun.Subprocess<'ignore', 'pipe', 'pipe'>) {
+  const reader = child.stdout.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  return {
+    async next(): Promise<string> {
+      while (!buffer.includes('\n')) {
+        const chunk = await reader.read()
+        if (chunk.done) throw new Error(`stdout ended before a full line: ${await new Response(child.stderr).text()}`)
+        buffer += decoder.decode(chunk.value, { stream: true })
+      }
+      const end = buffer.indexOf('\n')
+      const line = buffer.slice(0, end)
+      buffer = buffer.slice(end + 1)
+      return line
+    },
+    async rest(): Promise<string> {
+      for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) buffer += decoder.decode(chunk.value, { stream: true })
+      return buffer
+    },
+  }
 }
 
 async function run(...args: string[]): Promise<Finished> {
@@ -33,31 +67,20 @@ async function run(...args: string[]): Promise<Finished> {
   return finished(child, new Response(child.stdout).text())
 }
 
-// A running `serve`: the parsed ready line, and a stop that sends SIGTERM and returns how it finished.
-// The stdout reader keeps reading after the first line, so the test sees anything else written there.
+// A running `serve`: the parsed ready line, and a stop that sends SIGTERM and returns how it finished,
+// with everything written on stdout, ready line included.
 async function serve(...args: string[]) {
   const child = spawn([CLI, 'serve', ...args])
-  const reader = child.stdout.getReader()
-  let text = ''
-  while (!text.includes('\n')) {
-    const chunk = await reader.read()
-    if (chunk.done) throw new Error(`serve exited before its ready line: ${await new Response(child.stderr).text()}`)
-    text += new TextDecoder().decode(chunk.value)
-  }
-  const firstLine = text.slice(0, text.indexOf('\n'))
-  const rest = (async () => {
-    let more = text
-    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) more += new TextDecoder().decode(chunk.value)
-    return more
-  })()
-  const ready = JSON.parse(firstLine) as { port: number; ca: string }
+  const stdout = stdoutLines(child)
+  const line = await stdout.next()
+  const ready = JSON.parse(line) as { port: number; ca: string }
   return {
-    firstLine,
+    firstLine: line,
     ready,
     origin: `http://127.0.0.1:${ready.port}`,
     stop: () => {
       child.kill('SIGTERM')
-      return finished(child, rest)
+      return finished(child, stdout.rest().then(more => `${line}\n${more}`))
     },
   }
 }
@@ -133,6 +156,7 @@ describe('a wrong command line', () => {
     ['a port that is not a number', ['serve', '--port', 'abc'], '"abc"'],
     ['a port out of range', ['serve', '--port', '70000'], '"70000"'],
     ['a missing account file', ['serve', '--account', '/nonexistent/account.json'], '/nonexistent/account.json'],
+    ['a missing scripts directory', ['serve', '--scenarios', '/nonexistent/scripts'], '/nonexistent/scripts'],
   ]
   for (const [what, args, named] of cases) {
     test(`${what}: exit 2, a USAGE record naming the cause, nothing on stdout`, async () => {
@@ -153,21 +177,31 @@ describe('a wrong command line', () => {
   })
 })
 
-// The dispatcher run on a table of stand-in commands, in a script of its own, so a command can do what
-// no real one should: raise an error outside its call chain, or return a child's exit code.
-async function dispatch(name: string, body: string): Promise<Finished & { cleanedUp: boolean }> {
+// The dispatcher run on a table of one stand-in command, in a script of its own, so a command can do
+// what no real one should: raise an error outside its call chain, ignore a signal, or return a child's
+// exit code. `body` is the command's own; it can write `marker` to show it ran to its end, and call
+// `say(line)` so the test knows how far it got.
+async function dispatch(kind: 'task' | 'service', body: string) {
   const dir = await directory()
   const script = join(dir, 'main.ts')
+  const marker = join(dir, 'cleaned-up')
   await Bun.write(
     script,
     `import { main } from ${JSON.stringify(COMMAND)}
-const marker = ${JSON.stringify(join(dir, 'cleaned-up'))}
-process.exitCode = await main({ ${name}: { usage: '', run: async (args, ended) => { ${body} } } }, [${JSON.stringify(name)}])
+const marker = ${JSON.stringify(marker)}
+const say = (line) => process.stdout.write(line + '\\n')
+const forever = new Promise(() => {})
+process.exitCode = await main({ stand_in: { kind: '${kind}', usage: '', run: async (args, ended) => { ${body} } } }, ['stand_in'])
 `,
   )
   const child = spawn([script])
-  const result = await finished(child, new Response(child.stdout).text())
-  return { ...result, cleanedUp: await Bun.file(join(dir, 'cleaned-up')).exists() }
+  const stdout = stdoutLines(child)
+  return {
+    // The command's next `say`: once it is read, a signal sent next finds the dispatcher listening.
+    said: () => stdout.next(),
+    signal: (signal: 'SIGINT' | 'SIGTERM') => child.kill(signal),
+    finished: async () => ({ ...(await finished(child, stdout.rest())), cleanedUp: await Bun.file(marker).exists() }),
+  }
 }
 
 describe('the dispatcher', () => {
@@ -176,30 +210,59 @@ describe('the dispatcher', () => {
     ['a rejection nobody handled', `setTimeout(() => { void Promise.reject(new Error('a lost promise')) }, 10)`, 'a lost promise'],
   ]
   for (const [what, raise, message] of crashes) {
-    test(`${what} ends the run as failed, after the command cleans up, keeping its facts`, async () => {
-      const result = await dispatch(
-        'waits',
-        `${raise}
+    test(`${what} ends a service as failed, after it stops, keeping its facts`, async () => {
+      const result = await (
+        await dispatch(
+          'service',
+          `${raise}
 const reason = await ended
 await Bun.write(marker, 'yes')
 return { outcome: 'ok', facts: { ended: 'crashed' in reason ? 'crashed' : reason.signal } }`,
-      )
+        )
+      ).finished()
       expect(result.exit).toBe(1)
       expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: { ended: 'crashed' } })
       expect(result.record.why).toContain(message)
       expect(result.stderr.filter(line => line.startsWith('FAILED '))).toHaveLength(1)
       expect(result.cleanedUp).toBe(true)
     })
+
+    test(`${what} ends a task that is stuck, without waiting for it`, async () => {
+      const result = await (await dispatch('task', `${raise}\nawait forever`)).finished()
+      expect(result.exit).toBe(1)
+      expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: {} })
+      expect(result.record.why).toContain(message)
+    })
   }
 
+  test('a signal ends a task at once, with a FAILED record naming it', async () => {
+    const running = await dispatch('task', `say('running')\nawait forever`)
+    expect(await running.said()).toBe('running')
+    running.signal('SIGTERM')
+    const result = await running.finished()
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGTERM before the command finished' })
+  })
+
+  test('a second signal ends a service that is still stopping, with its record', async () => {
+    const running = await dispatch('service', `say('running')\nawait ended\nsay('stopping')\nawait forever`)
+    expect(await running.said()).toBe('running')
+    running.signal('SIGINT')
+    expect(await running.said()).toBe('stopping')
+    running.signal('SIGINT')
+    const result = await running.finished()
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, why: 'SIGINT before the command finished\nSIGINT before the command finished' })
+  })
+
   test("a child's exit code is the run's", async () => {
-    const result = await dispatch('child', `return { outcome: 'exited', code: 3, facts: { child: 'stand-in' } }`)
+    const result = await (await dispatch('task', `return { outcome: 'exited', code: 3, facts: { child: 'stand-in' } }`)).finished()
     expect(result.exit).toBe(3)
     expect(result.record).toMatchObject({ outcome: 'exited', code: 3, exit: 3, facts: { child: 'stand-in' } })
   })
 
   test('a command that throws: exit 1 and a FAILED record carrying the stack', async () => {
-    const result = await dispatch('throws', `throw new Error('the command broke')`)
+    const result = await (await dispatch('task', `throw new Error('the command broke')`)).finished()
     expect(result.exit).toBe(1)
     expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: {} })
     expect(result.record.why).toContain('the command broke')

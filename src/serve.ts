@@ -1,18 +1,18 @@
+import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { DEFAULT_ACCOUNT, readAccountFile } from './account.ts'
+import { type Account, AccountInputError, DEFAULT_ACCOUNT, readAccountFile } from './account.ts'
 import { CERTS_DIR } from './certificates.ts'
 import { type Command, parse, UsageError } from './command.ts'
 import { ENDPOINT_TABLE } from './endpoints.ts'
 import { mockGenerators } from './generators.ts'
 import { eventLine } from './log.ts'
-import { startServer } from './server.ts'
+import { parsePort, startServer } from './server.ts'
 
 // PROJECT.md "Commands": `serve` starts the mock and runs until it is told to stop. Its one stdout line
 // is how a consumer finds it; everything else it says goes to stderr.
 
-const MAX_PORT = 65535
-
 export const serve: Command = {
+  kind: 'service',
   usage: '[--port N] [--scenarios DIR]... [--account FILE]',
   async run(args, ended) {
     const flags = parse(args, {
@@ -20,11 +20,11 @@ export const serve: Command = {
       scenarios: { type: 'string', multiple: true, default: [] },
       account: { type: 'string' },
     })
-    const port = portNumber(flags.port)
-    // Absolute, so a FAILED line names the directory whatever the reader's working directory.
-    const scenarios = flags.scenarios.map(dir => resolve(dir))
+    const port = parsePort(flags.port)
+    if (port === null) throw new UsageError(`--port ${JSON.stringify(flags.port)}: not a port number from 0 to 65535`)
+    const scenarios = await Promise.all(flags.scenarios.map(scenarioDirectory))
     const accountFile = flags.account === undefined ? null : resolve(flags.account)
-    const account = accountFile === null ? DEFAULT_ACCOUNT : await readAccountFile(accountFile)
+    const account = await accountFrom(accountFile)
     const server = await startServer({
       port,
       table: ENDPOINT_TABLE,
@@ -52,7 +52,22 @@ export const serve: Command = {
   },
 }
 
-function portNumber(text: string): number {
-  if (!/^\d{1,5}$/.test(text) || Number(text) > MAX_PORT) throw new UsageError(`--port ${JSON.stringify(text)}: not a port number from 0 to ${MAX_PORT}`)
-  return Number(text)
+// Absolute, so a FAILED line names the directory whatever the reader's working directory. Its scripts
+// are read per request (scripts.ts), so one written after the start still answers; a directory that is
+// not there at the start is a wrong command line.
+async function scenarioDirectory(dir: string): Promise<string> {
+  const path = resolve(dir)
+  const found = await stat(path).catch((error: unknown) => {
+    throw new UsageError(`--scenarios ${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  })
+  if (!found.isDirectory()) throw new UsageError(`--scenarios ${path}: not a directory`)
+  return path
+}
+
+// An account file that cannot be read or is not an account is a wrong command line.
+async function accountFrom(file: string | null): Promise<Account> {
+  if (file === null) return DEFAULT_ACCOUNT
+  return readAccountFile(file).catch((error: unknown) => {
+    throw error instanceof AccountInputError ? new UsageError(error.message, { cause: error }) : error
+  })
 }

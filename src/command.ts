@@ -1,19 +1,22 @@
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util'
-import { AccountInputError } from './account.ts'
+import type { Facts } from './dispatch.ts'
 import { type CommandEvent, type CommandResult, type Ending, eventLine, exitCode } from './log.ts'
 
 // PROJECT.md "Commands": the dispatcher every command runs under. It owns what a command does not: the
 // invocation's lifetime, its one record, and its exit code.
 
 // Why an invocation was asked to end: a signal, or errors raised outside any command's call chain.
-export type EndReason = { readonly signal: 'SIGINT' | 'SIGTERM' } | { readonly crashed: readonly unknown[] }
+export type EndReason = { readonly signal: Signal } | { readonly crashed: readonly unknown[] }
 
-// A command reads its arguments and returns its result. One that runs until told to stop (serve)
-// awaits `ended`; one that finishes on its own never reads it.
-export type Command = {
-  readonly usage: string
-  readonly run: (args: readonly string[], ended: Promise<EndReason>) => Promise<CommandResult>
-}
+type Signal = 'SIGINT' | 'SIGTERM'
+
+// [LAW:types-are-the-program] How a command ends is its kind. A task finishes by itself and never hears
+// of a signal or a crash: either ends the invocation at once, without waiting for it. A service runs
+// until `ended` and then stops; while it stops, a second signal ends the invocation without it.
+export type Command = { readonly usage: string } & (
+  | { readonly kind: 'task'; readonly run: (args: readonly string[]) => Promise<CommandResult> }
+  | { readonly kind: 'service'; readonly run: (args: readonly string[], ended: Promise<EndReason>) => Promise<CommandResult> }
+)
 
 export type Commands = { readonly [name: string]: Command }
 
@@ -38,27 +41,51 @@ export function parse<const O extends ParseArgsOptionsConfig>(args: readonly str
 // returns the code that line carries.
 export async function main(commands: Commands, argv: readonly string[]): Promise<number> {
   const started = performance.now()
-  const ending = await invoke(commands, argv)
+  const { ending, abandoned } = await invoke(commands, argv)
   const event: CommandEvent = { event: 'command', argv, duration_ms: Math.round(performance.now() - started), exit: exitCode(ending), ...ending }
   process.stderr.write(`${eventLine(event)}\n`)
+  // A command that was not waited for is still running, and nothing else will stop it. Otherwise the
+  // process ends by itself: process.exit drops piped output Bun has not yet written (Bun 1.3.14 holds
+  // it past the pipe's 64 KiB with writableLength 0), so it is kept for the run whose output is cut
+  // short anyway.
+  if (abandoned) process.exit(event.exit)
   return event.exit
 }
 
-async function invoke(commands: Commands, argv: readonly string[]): Promise<Ending> {
+type Invoked = { readonly ending: Ending; readonly abandoned: boolean }
+
+async function invoke(commands: Commands, argv: readonly string[]): Promise<Invoked> {
   const [name, ...args] = argv
   const command = name !== undefined && Object.hasOwn(commands, name) ? commands[name] : undefined
-  if (command === undefined) return usage(commands, name === undefined ? 'no command given' : `unknown command: ${name}`)
-  const lifetime = watch()
+  if (command === undefined) return { ending: usage(commands, name === undefined ? 'no command given' : `unknown command: ${name}`), abandoned: false }
+  const lifetime = watch(command.kind)
   try {
-    const result = await command.run(args, lifetime.ended)
+    const running = command.kind === 'task' ? command.run(args) : command.run(args, lifetime.ended)
+    const settled = await Promise.race([
+      running.then(
+        result => ({ kind: 'returned', result }) as const,
+        (error: unknown) => ({ kind: 'threw', error }) as const,
+      ),
+      lifetime.forced.then(() => ({ kind: 'abandoned' }) as const),
+    ])
+    // Errors nobody caught outrank whatever the command did after them: they are why it ended.
     const crashed = lifetime.crashed()
-    return crashed.length === 0 ? result : { outcome: 'failed', why: crashed.map(describe).join('\n'), facts: result.facts }
-  } catch (error) {
-    if (error instanceof UsageError || error instanceof AccountInputError) return usage(commands, error.message)
-    return { outcome: 'failed', why: [...lifetime.crashed(), error].map(describe).join('\n'), facts: {} }
+    switch (settled.kind) {
+      case 'abandoned':
+        return { ending: failed(crashed, lifetime.signals().map(signal => `${signal} before the command finished`), {}), abandoned: true }
+      case 'returned':
+        return { ending: crashed.length === 0 ? settled.result : failed(crashed, [], settled.result.facts), abandoned: false }
+      case 'threw':
+        if (crashed.length === 0 && settled.error instanceof UsageError) return { ending: usage(commands, settled.error.message), abandoned: false }
+        return { ending: failed([...crashed, settled.error], [], {}), abandoned: false }
+    }
   } finally {
     lifetime.close()
   }
+}
+
+function failed(errors: readonly unknown[], notes: readonly string[], facts: Facts): Ending {
+  return { outcome: 'failed', why: [...errors.map(describe), ...notes].join('\n'), facts }
 }
 
 function usage(commands: Commands, why: string): Ending {
@@ -67,28 +94,47 @@ function usage(commands: Commands, why: string): Ending {
   return { outcome: 'usage', why, facts: {} }
 }
 
-// [LAW:no-ambient-temporal-coupling] The invocation's lifetime, owned here: the first SIGINT or SIGTERM,
-// or the first error nobody caught (a sink's failure is reported with reportError, server.ts), ends it.
-// Every such error is kept for the record, and the listeners last exactly as long as the command.
-function watch(): { readonly ended: Promise<EndReason>; crashed(): readonly unknown[]; close(): void } {
+// [LAW:no-ambient-temporal-coupling] The invocation's lifetime, owned here. Each SIGINT or SIGTERM, and
+// each error nobody caught (a sink's failure is reported with reportError, server.ts), is an end: the
+// first resolves `ended`. `forced` resolves when the command can no longer be waited for: at the first
+// end for a task, which never hears one, and at a signal after the first end for a service, which is
+// stopping. Every end is kept for the record, and the listeners last exactly as long as the command.
+function watch(kind: Command['kind']) {
   const crashes: unknown[] = []
+  const signals: Signal[] = []
+  let ends = 0
   let end!: (reason: EndReason) => void
+  let force!: () => void
   const ended = new Promise<EndReason>(resolve => {
     end = resolve
   })
-  const onInterrupt = () => end({ signal: 'SIGINT' })
-  const onTerminate = () => end({ signal: 'SIGTERM' })
+  const forced = new Promise<void>(resolve => {
+    force = resolve
+  })
+  const onEnd = (reason: EndReason) => {
+    ends += 1
+    end(reason)
+    if (kind === 'task' || ('signal' in reason && ends > 1)) force()
+  }
+  const onSignal = (signal: Signal) => {
+    signals.push(signal)
+    onEnd({ signal })
+  }
+  const onInterrupt = () => onSignal('SIGINT')
+  const onTerminate = () => onSignal('SIGTERM')
   const onCrash = (error: unknown) => {
     crashes.push(error)
-    end({ crashed: crashes })
+    onEnd({ crashed: crashes })
   }
-  process.once('SIGINT', onInterrupt)
-  process.once('SIGTERM', onTerminate)
+  process.on('SIGINT', onInterrupt)
+  process.on('SIGTERM', onTerminate)
   process.on('uncaughtException', onCrash)
   process.on('unhandledRejection', onCrash)
   return {
     ended,
-    crashed: () => crashes,
+    forced,
+    crashed: (): readonly unknown[] => crashes,
+    signals: (): readonly Signal[] => signals,
     close() {
       process.off('SIGINT', onInterrupt)
       process.off('SIGTERM', onTerminate)

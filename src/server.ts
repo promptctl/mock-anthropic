@@ -315,9 +315,16 @@ function connectTarget(text: string): { host: string; port: number } | { host: s
   // Authority form (RFC 9110 9.3.6) is a host and a port alone. URL quietly strips userinfo and paths
   // and decodes escapes and backslashes, so its host is taken only when it reads the text back as
   // itself, up to case, and any other target is malformed.
-  const [, authority, port] = /^(.+):(\d{1,5})$/.exec(text) ?? []
+  const [, authority, digits = ''] = /^(.+):(.*)$/.exec(text) ?? []
   const host = authority === undefined ? undefined : URL.parse(`http://${authority}/`)?.hostname
-  return host !== undefined && host === authority?.toLowerCase() && Number(port) <= 65535 ? { host, port: Number(port) } : { host: text, port: null }
+  const port = parsePort(digits)
+  return host !== undefined && host === authority?.toLowerCase() && port !== null ? { host, port } : { host: text, port: null }
+}
+
+// [LAW:one-source-of-truth] What a port number is, as text: one to five decimal digits, at most 65535.
+// Null for anything else.
+export function parsePort(text: string): number | null {
+  return /^\d{1,5}$/.test(text) && Number(text) <= 65535 ? Number(text) : null
 }
 
 function refuse(client: net.Socket, status: string, what: string): void {
