@@ -60,7 +60,7 @@ A consumer supplies a directory of script files. Each file says which Messages r
 
 Claude Code makes some model calls beside a turn. The mock recognizes each one by its prompt and generates the answer, so a consumer never has to script them:
 
-- **Session title.** Both phrasings are covered: 2.1.283's "Generate a concise, sentence-case title" and 2.1.289's "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
+- **Session title.** Both phrasings are covered: older builds' "Generate a concise, sentence-case title" and, from 2.1.283 on, "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
 - **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is `<severity>N</severity>`, where a value below 50 allows the action. The default allows; a consumer can script a block.
 - **Quota probe.**
 

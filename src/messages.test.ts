@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
 
 const MODEL = 'claude-sonnet-5-5'
+// The fields the API requires beside the messages.
+const REQUIRED = { model: MODEL, max_tokens: 1024 }
 
 function parsed(body: unknown): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify(body))
@@ -34,13 +36,13 @@ describe('parseMessagesRequest', () => {
   })
 
   test('a request that does not ask for a stream is not one, as the API defaults it', () => {
-    expect(parsed({ model: MODEL, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
-    expect(parsed({ model: MODEL, stream: false, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
+    expect(parsed({ ...REQUIRED, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
+    expect(parsed({ ...REQUIRED, stream: false, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
   })
 
   test('the last user text is the last user message, not an earlier one or a later assistant turn', () => {
     const request = parsed({
-      model: MODEL,
+      ...REQUIRED,
       messages: [
         { role: 'user', content: 'first question' },
         { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
@@ -53,7 +55,7 @@ describe('parseMessagesRequest', () => {
 
   test('the texts of a message are its text blocks and its tool results, by block type', () => {
     const request = parsed({
-      model: MODEL,
+      ...REQUIRED,
       messages: [
         {
           role: 'user',
@@ -73,18 +75,40 @@ describe('parseMessagesRequest', () => {
   test('a body that is not a Messages request is invalid, with the reason', () => {
     expect(invalid('{not json')).toStartWith('body is not JSON: ')
     expect(invalid('[]')).toStartWith('body is not a Messages request: ')
-    expect(invalid(JSON.stringify({ model: MODEL }))).toContain('messages')
-    expect(invalid(JSON.stringify({ model: MODEL, messages: [] }))).toContain('messages')
-    expect(invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'assistant', content: 'only me' }] }))).toContain('has no user message')
-    expect(invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'system', content: 'x' }] }))).toContain('role')
-    expect(invalid(JSON.stringify({ messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
-    expect(invalid(JSON.stringify({ model: '', messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
-    expect(invalid(JSON.stringify({ model: MODEL, stream: 'yes', messages: [{ role: 'user', content: 'x' }] }))).toContain('stream')
+    expect(invalid(JSON.stringify({ ...REQUIRED }))).toContain('messages')
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [] }))).toContain('messages')
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'assistant', content: 'only me' }] }))).toContain('has no user message')
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'system', content: 'x' }] }))).toContain('role')
+    expect(invalid(JSON.stringify({ max_tokens: 1024, messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
+    expect(invalid(JSON.stringify({ ...REQUIRED, model: '', messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
+    expect(invalid(JSON.stringify({ ...REQUIRED, stream: 'yes', messages: [{ role: 'user', content: 'x' }] }))).toContain('stream')
+  })
+
+  test('the system texts are the system prompt, one per block, and none when there is no system prompt', () => {
+    const hi = [{ role: 'user', content: 'hi' }]
+    expect(parsed({ ...REQUIRED, system: 'You are terse.', messages: hi }).systemTexts).toEqual(['You are terse.'])
+    const blocks = [{ type: 'text', text: 'billing header' }, { type: 'text', text: 'You are terse.', cache_control: { type: 'ephemeral' } }]
+    expect(parsed({ ...REQUIRED, system: blocks, messages: hi }).systemTexts).toEqual(['billing header', 'You are terse.'])
+    expect(parsed({ ...REQUIRED, messages: hi }).systemTexts).toEqual([])
+  })
+
+  test('max_tokens is required and positive, as the API has it', () => {
+    const hi = [{ role: 'user', content: 'hi' }]
+    expect(parsed({ ...REQUIRED, max_tokens: 1, messages: hi }).max_tokens).toBe(1)
+    expect(invalid(JSON.stringify({ model: MODEL, messages: hi }))).toContain('max_tokens')
+    expect(invalid(JSON.stringify({ ...REQUIRED, max_tokens: 0, messages: hi }))).toContain('max_tokens')
+    expect(invalid(JSON.stringify({ ...REQUIRED, max_tokens: 1.5, messages: hi }))).toContain('max_tokens')
+  })
+
+  test('a system prompt holding anything but text blocks is invalid', () => {
+    const hi = [{ role: 'user', content: 'hi' }]
+    expect(invalid(JSON.stringify({ ...REQUIRED, system: [{ type: 'image', source: {} }], messages: hi }))).toContain('system')
+    expect(invalid(JSON.stringify({ ...REQUIRED, system: 5, messages: hi }))).toContain('system')
   })
 
   test('a malformed block of a type it reads does not pass as some other block', () => {
-    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
-    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
-    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
+    invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
+    invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
+    invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
   })
 })
