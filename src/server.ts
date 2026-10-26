@@ -3,7 +3,7 @@ import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type Certificates, ensureCertificates } from './certificates.ts'
-import { dispatch, type Generators, type Verdict } from './dispatch.ts'
+import { dispatch, errorResponse, type Generators, type Verdict } from './dispatch.ts'
 import { API, type EndpointRow, type EndpointTable, resolveEndpoint, tableHosts } from './endpoints.ts'
 
 // PROJECT.md "How a program reaches it" and "Failure behavior": one listener on 127.0.0.1 that is
@@ -82,18 +82,22 @@ type Kind = {
 
 const LOOPBACK = '127.0.0.1'
 const ESTABLISHED = 'HTTP/1.1 200 Connection Established\r\n\r\n'
-const CONNECT_LINE = /^CONNECT (\S+) HTTP\/1\.[01]$/
+// Every host in the table speaks HTTPS on 443 and nothing else, and a tunnel is always TLS.
+const HTTPS_PORT = 443
 // Bun.serve answers a malformed request line or oversized headers itself, before the mock sees the
-// request, so a connection's zero requests name that cause beside the likelier one.
+// request, and Bun gives no sign that a tunnel's TLS handshake finished, so a tunnel's zero requests
+// name every cause beside the likeliest one.
 const TUNNEL_UNANSWERED =
-  "closed before any request reached the mock: a client that does not trust the mock's CA (NODE_EXTRA_CA_CERTS) closes its tunnel this way, and so does a request Bun.serve answers itself as malformed or with oversized headers"
+  "closed before any request reached the mock: a client that does not trust the mock's CA (NODE_EXTRA_CA_CERTS) closes its tunnel this way, and so do a request Bun.serve answers itself as malformed or with oversized headers, and a client that opens a tunnel and never uses it"
 const PLAIN_UNANSWERED = 'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it'
 const UNFINISHED_LINE = 'closed before finishing its request line'
 // An HTTP/1 request line: a method (a token; every method Claude Code sends is capitals), a target, and
-// the version. Bun.serve, given a line that is not one, neither answers nor closes, so the front checks
-// the first line itself and refuses one that is not, and one that grows past MAX_LINE without ending.
+// the version, ended by CRLF. Bun.serve, given a line that is not one, neither answers nor closes, so
+// the front checks the first line itself and refuses one that is not, and one that grows past MAX_LINE
+// without ending. A line ended by a bare LF, which RFC 9112 2.2 lets a server accept or refuse, is
+// refused, so a client that sends one hears why instead of waiting on a CRLF that never comes.
 const REQUEST_START = /^[A-Z]/
-const REQUEST_LINE = /^[A-Z]+ \S+ HTTP\/1\.[01]$/
+const REQUEST_LINE = /^([A-Z]+) (\S+) HTTP\/1\.[01]\r$/
 const MAX_LINE = 8192
 // Why a request ended early: who ended it, and before what.
 const BODY_CUT_OFF = 'the request body finished'
@@ -150,14 +154,23 @@ export async function startServer<R extends EndpointRow>(options: ServerOptions<
       emit(why === null ? { ...base, outcome: 'closed' } : { ...base, outcome: 'failed', why })
     })
 
+  // A connection addressed to a host or port the mock does not answer gets a 403 naming it, and its record.
+  const forbid = (client: net.Socket, host: string, port: number | null, what: string, why: string) => {
+    refuse(client, '403 Forbidden', `${what}: ${why}`)
+    emit({ event: 'connection', tunnel: null, host, port, outcome: 'refused', why })
+  }
+
   const tunnel = (client: net.Socket, target: string, rest: Buffer) => {
     const parsed = connectTarget(target)
-    if (parsed.port === null || !hosts.includes(parsed.host)) {
-      const why = parsed.port === null ? 'malformed CONNECT target' : 'not a host the mock answers'
-      refuse(client, '403 Forbidden', `CONNECT ${target}: ${why}`)
-      emit({ event: 'connection', tunnel: null, host: parsed.host, port: parsed.port, outcome: 'refused', why })
-      return
-    }
+    const why =
+      parsed.port === null
+        ? 'malformed CONNECT target'
+        : !hosts.includes(parsed.host)
+          ? 'not a host the mock answers'
+          : parsed.port !== HTTPS_PORT
+            ? `not port ${HTTPS_PORT}, the only port the mock answers`
+            : null
+    if (why !== null) return forbid(client, parsed.host, parsed.port, `CONNECT ${target}`, why)
     return served(client, {
       authority: parsed.host,
       tunnel: nextTunnel++,
@@ -169,8 +182,15 @@ export async function startServer<R extends EndpointRow>(options: ServerOptions<
     })
   }
 
-  const plain = (client: net.Socket, read: Buffer) =>
-    served(client, { authority: API, tunnel: null, port: null, tls: null, greeting: '', replay: read, unanswered: PLAIN_UNANSWERED })
+  // RFC 9112 3.2.2: a request whose target is in absolute form is addressed to the host it names. The
+  // plain port is the origin for api.anthropic.com alone, so an http:// URL for any other host, which an
+  // HTTP_PROXY client sends this way, is refused as a CONNECT to an unknown host is. The front reads only
+  // a connection's first request line, so a connection is judged by its first request.
+  const plain = (client: net.Socket, target: string, read: Buffer) => {
+    const host = target.startsWith('/') ? API : (URL.parse(target)?.hostname ?? target)
+    if (host !== API) return forbid(client, host, null, target, `not ${API}, the only host the plain port answers; others are reached through CONNECT`)
+    return served(client, { authority: API, tunnel: null, port: null, tls: null, greeting: '', replay: read, unanswered: PLAIN_UNANSWERED })
+  }
 
   const front = net.createServer(client => {
     const started = performance.now()
@@ -183,7 +203,7 @@ export async function startServer<R extends EndpointRow>(options: ServerOptions<
           case 'connect':
             return tunnel(client, first.target, first.rest)
           case 'plain':
-            return plain(client, first.read)
+            return plain(client, first.target, first.read)
           case 'refused':
             refuse(client, '400 Bad Request', first.why)
             return emit({ ...unserved, outcome: 'refused', why: first.why })
@@ -200,9 +220,13 @@ export async function startServer<R extends EndpointRow>(options: ServerOptions<
     )
   })
 
+  // A port that cannot be listened on fails the start, and leaves nothing behind.
   await new Promise<void>((resolve, reject) => {
     front.once('error', reject)
     front.listen(options.port, LOOPBACK, () => resolve())
+  }).catch(async (error: unknown) => {
+    await rm(socketDir, { recursive: true, force: true })
+    throw error
   })
   const { port } = front.address() as net.AddressInfo
 
@@ -229,7 +253,7 @@ export async function startServer<R extends EndpointRow>(options: ServerOptions<
 // TLS handshake may never contain, and so is a first line that is not a request line. A client that closes first says how many bytes it had sent.
 type Opening =
   | { readonly kind: 'connect'; readonly target: string; readonly rest: Buffer }
-  | { readonly kind: 'plain'; readonly read: Buffer }
+  | { readonly kind: 'plain'; readonly target: string; readonly read: Buffer }
   | { readonly kind: 'refused'; readonly why: string }
   | { readonly kind: 'closed'; readonly read: number }
 
@@ -246,15 +270,15 @@ function opening(client: net.Socket): Promise<Opening> {
     const onData = (chunk: Buffer) => {
       read = Buffer.concat([read, chunk])
       if (!REQUEST_START.test(read.toString('latin1', 0, 1))) return settle({ kind: 'refused', why: notARequest(read[0] as number) })
-      const lineEnd = read.indexOf('\r\n')
+      const lineEnd = read.indexOf('\n')
       if (lineEnd === -1) {
         if (read.length > MAX_LINE) settle({ kind: 'refused', why: `request line longer than ${MAX_LINE} bytes` })
         return
       }
       const line = read.subarray(0, lineEnd).toString('latin1')
-      if (!REQUEST_LINE.test(line)) return settle({ kind: 'refused', why: `malformed request line: ${JSON.stringify(line.slice(0, 200))}` })
-      const target = CONNECT_LINE.exec(line)?.[1]
-      if (target === undefined) return settle({ kind: 'plain', read })
+      const [, method, target] = REQUEST_LINE.exec(line) ?? []
+      if (target === undefined) return settle({ kind: 'refused', why: `malformed request line: ${JSON.stringify(line.slice(0, 200))}` })
+      if (method !== 'CONNECT') return settle({ kind: 'plain', target, read })
       const headEnd = read.indexOf('\r\n\r\n')
       if (headEnd !== -1) settle({ kind: 'connect', target, rest: read.subarray(headEnd + 4) })
       else if (read.length > MAX_HEAD) settle({ kind: 'refused', why: `CONNECT head longer than ${MAX_HEAD} bytes` })
@@ -422,8 +446,9 @@ function serveRequest<R extends EndpointRow>(
   url.pathname = path
   url.search = query ?? ''
   const { method } = incoming
-  const resolved = resolveEndpoint(table, method, url)?.endpoint.id ?? null
-  const base = { event: 'request', tunnel: kind.tunnel, host: url.hostname, method, path: url.pathname, query: url.search } as const
+  const resolution = resolveEndpoint(table, method, url)
+  const endpoint = resolution?.endpoint.id ?? null
+  const base = { event: 'request', tunnel: kind.tunnel, host: url.hostname, method, path: url.pathname, query: url.search, endpoint } as const
   let record!: (event: RequestEvent) => void
   let stopListening = () => {}
   const recorded = new Promise<void>(resolve => {
@@ -443,7 +468,7 @@ function serveRequest<R extends EndpointRow>(
   })
   const unlessAbandoned = <T>(work: Promise<T>) => Promise.race([work, abandoned])
   const aborted = (before: string) => {
-    record({ ...base, endpoint: resolved, status: null, duration_ms: elapsed(started), outcome: 'aborted', why: endedEarly(closer(), before) })
+    record({ ...base, status: null, duration_ms: elapsed(started), outcome: 'aborted', why: endedEarly(closer(), before) })
     // The client is gone, or the mock is stopping; nothing reads this.
     return new Response(null)
   }
@@ -452,25 +477,22 @@ function serveRequest<R extends EndpointRow>(
     // the same signal, met through the read.
     const body = await unlessAbandoned(incoming.text()).catch(() => 'abandoned' as const)
     if (body === 'abandoned') return aborted(BODY_CUT_OFF)
-    const dispatching = dispatch(table, generators, { method, url, headers: incoming.headers, body })
+    const dispatching = dispatch(generators, resolution, { method, url, headers: incoming.headers, body })
     const dispatched = await unlessAbandoned(dispatching)
     if (dispatched === 'abandoned') {
       // The response arrives with nobody to read it; cancelling its body stops whatever produces it.
       void dispatching.then(late => quietly(late.response.body?.cancel(endedEarly(closer(), NOT_READY))))
       return aborted(NOT_READY)
     }
-    const { endpoint, verdict, response } = dispatched
+    const { verdict, response } = dispatched
     return observed(method === 'HEAD' ? headersOnly(response) : response, carrier.kill, abandoned, closer, delivery => {
       const outcome = delivery.ended === 'complete' ? verdict : { outcome: delivery.ended, why: delivery.why }
-      record({ ...base, endpoint, status: response.status, duration_ms: elapsed(started), ...outcome })
+      record({ ...base, status: response.status, duration_ms: elapsed(started), ...outcome })
     })
   })().catch((error: unknown) => {
     const why = `the mock failed: ${error instanceof Error ? error.message : String(error)}`
-    record({ ...base, endpoint: resolved, status: 500, duration_ms: elapsed(started), outcome: 'failed', why })
-    return new Response(`mock-anthropic FAILED: ${method} ${url.hostname} ${url.pathname}: ${why}\n`, {
-      status: 500,
-      headers: { 'x-should-retry': 'false' },
-    })
+    record({ ...base, status: 500, duration_ms: elapsed(started), outcome: 'failed', why })
+    return errorResponse(500, 'FAILED', { method, url }, why)
   })
   return { response, recorded }
 }

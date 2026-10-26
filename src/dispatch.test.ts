@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { type Generators, dispatch, type MockRequest } from './dispatch.ts'
-import { buildEndpointTable } from './endpoints.ts'
+import { buildEndpointTable, resolveEndpoint } from './endpoints.ts'
 
 const API = 'api.anthropic.com'
 
@@ -12,8 +12,6 @@ const ROWS = [
   { id: 'ungenerated', host: API, method: 'GET', path: '/ungenerated', scope: 'in-scope' },
   { id: 'refused', host: API, method: 'GET', path: '/refused', scope: 'out-of-scope', reason: 'a test reason' },
 ] as const
-
-type Id = (typeof ROWS)[number]['id']
 
 const TABLE = buildEndpointTable(ROWS)
 
@@ -36,27 +34,28 @@ const request = (method: string, path: string, body = ''): MockRequest => ({
   body,
 })
 
-const run = (method: string, path: string, body?: string) => dispatch(TABLE, GENERATORS, request(method, path, body))
+const run = (method: string, path: string, body?: string) => {
+  const sent = request(method, path, body)
+  return dispatch(GENERATORS, resolveEndpoint(TABLE, method, sent.url), sent)
+}
 
 describe('dispatch', () => {
-  test("a generator's response is served as it was given, with the row and its params", async () => {
-    const { endpoint, verdict, response } = await run('GET', '/served/abc')
-    expect(endpoint).toBe('served')
+  test("a generator's response is served as it was given, with the row's params", async () => {
+    const { verdict, response } = await run('GET', '/served/abc')
     expect(verdict).toEqual({ outcome: 'served' })
     expect(response.status).toBe(201)
     expect(await response.text()).toBe(`hello abc at ${API}`)
   })
 
-  const unmatched: [string, string, string, string, Id | null, string][] = [
-    ['no endpoint', 'GET', '/nowhere', '', null, 'no endpoint'],
-    ['an out-of-scope row', 'GET', '/refused', '', 'refused', 'out of scope: a test reason'],
-    ['an in-scope row with no generator', 'GET', '/ungenerated', '', 'ungenerated', 'no generator'],
-    ['a generator that declines', 'POST', '/declines', 'body-x', 'declines', 'nothing matches body-x'],
+  const unmatched: [string, string, string, string, string][] = [
+    ['no endpoint', 'GET', '/nowhere', '', 'no endpoint'],
+    ['an out-of-scope row', 'GET', '/refused', '', 'out of scope: a test reason'],
+    ['an in-scope row with no generator', 'GET', '/ungenerated', '', 'no generator'],
+    ['a generator that declines', 'POST', '/declines', 'body-x', 'nothing matches body-x'],
   ]
-  for (const [name, method, path, body, id, why] of unmatched) {
+  for (const [name, method, path, body, why] of unmatched) {
     test(`${name} is a 400 naming the method, host, path and why`, async () => {
-      const { endpoint, verdict, response } = await run(method, path, body)
-      expect(endpoint).toBe(id)
+      const { verdict, response } = await run(method, path, body)
       expect(verdict).toEqual({ outcome: 'unmatched', why })
       expect(response.status).toBe(400)
       expect(response.headers.get('x-should-retry')).toBe('false')

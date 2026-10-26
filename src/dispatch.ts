@@ -1,8 +1,7 @@
-import type { EndpointRow, EndpointTable, Resolution } from './endpoints.ts'
-import { resolveEndpoint } from './endpoints.ts'
+import type { EndpointRow, Resolution } from './endpoints.ts'
 
-// PROJECT.md "Failure behavior": from one request to the response that answers it and the verdict on
-// it. Every request the server receives, plain or tunneled, takes this one path.
+// PROJECT.md "Failure behavior": from one resolved request to the response that answers it and the
+// verdict on it. Every request the server receives, plain or tunneled, takes this one path.
 
 // A request as a generator sees it. `url`'s host is the authority the request was addressed to: the
 // CONNECT target for a tunneled request, api.anthropic.com for one sent straight to the port.
@@ -31,29 +30,24 @@ export type Verdict =
   | { readonly outcome: 'unmatched'; readonly why: string }
   | { readonly outcome: 'failed'; readonly why: string }
 
-export type Dispatched<R extends EndpointRow> = {
-  readonly endpoint: R['id'] | null
-  readonly verdict: Verdict
-  readonly response: Response
-}
+export type Dispatched = { readonly verdict: Verdict; readonly response: Response }
 
-// [LAW:dataflow-not-control-flow] Every request resolves, gets one verdict, and gets the response that
-// verdict implies; only the values differ.
+// [LAW:dataflow-not-control-flow] Every request gets one verdict and the response that verdict implies;
+// only the values differ. [LAW:one-source-of-truth] The resolution is the caller's, made once, so the
+// endpoint every record of the request names is the one that chose its generator.
 export async function dispatch<R extends EndpointRow>(
-  table: EndpointTable<R>,
   generators: Generators<R>,
+  resolution: Resolution<R> | null,
   request: MockRequest,
-): Promise<Dispatched<R>> {
-  const resolution = resolveEndpoint(table, request.method, request.url)
-  const endpoint = resolution?.endpoint.id ?? null
+): Promise<Dispatched> {
   const decision = await decide(generators, resolution, request)
   switch (decision.kind) {
     case 'response':
-      return { endpoint, verdict: { outcome: 'served' }, response: decision.response }
+      return { verdict: { outcome: 'served' }, response: decision.response }
     case 'declined':
-      return { endpoint, verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse(400, 'UNMATCHED', request, decision.why) }
+      return { verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse(400, 'UNMATCHED', request, decision.why) }
     case 'failed':
-      return { endpoint, verdict: { outcome: 'failed', why: decision.why }, response: errorResponse(500, 'FAILED', request, decision.why) }
+      return { verdict: { outcome: 'failed', why: decision.why }, response: errorResponse(500, 'FAILED', request, decision.why) }
   }
 }
 
@@ -82,8 +76,14 @@ async function decide<R extends EndpointRow>(
 }
 
 // The Anthropic API's error envelope, so Claude Code shows the message, and `x-should-retry: false`,
-// which the Anthropic SDK obeys, so a gap is one loud error and not a run of slow retries.
-function errorResponse(status: 400 | 500, label: 'UNMATCHED' | 'FAILED', request: MockRequest, why: string): Response {
+// which the Anthropic SDK obeys, so a gap is one loud error and not a run of slow retries. Every error
+// response the mock makes for a request is this one.
+export function errorResponse(
+  status: 400 | 500,
+  label: 'UNMATCHED' | 'FAILED',
+  request: Pick<MockRequest, 'method' | 'url'>,
+  why: string,
+): Response {
   const type = status === 400 ? 'invalid_request_error' : 'api_error'
   const message = `mock-anthropic ${label}: ${request.method} ${request.url.hostname} ${request.url.pathname}: ${why}`
   return Response.json(

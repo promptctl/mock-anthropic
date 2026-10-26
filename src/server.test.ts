@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +19,7 @@ const ROWS = [
   { id: 'stream', host: API, method: 'GET', path: '/stream', scope: 'in-scope' },
   { id: 'broken', host: API, method: 'GET', path: '/broken', scope: 'in-scope' },
   { id: 'slow', host: API, method: 'GET', path: '/slow', scope: 'in-scope' },
+  { id: 'locked', host: API, method: 'GET', path: '/locked', scope: 'in-scope' },
 ] as const
 
 const TABLE = buildEndpointTable(ROWS)
@@ -62,6 +63,12 @@ function generators(): { generators: Generators<(typeof ROWS)[number]>; controls
         began()
         await released
         return respond(new ReadableStream({ cancel: reason => cancel(String(reason)) }))
+      },
+      // Answers with a body something already reads, which the mock cannot pass on.
+      locked: () => {
+        const response = new Response('taken')
+        void response.body!.getReader()
+        return { kind: 'response', response }
       },
       // Fails on the read after its first chunk, as a generator that breaks partway would.
       broken: () => {
@@ -322,6 +329,37 @@ describe('as a plain origin', () => {
     ])
   })
 
+  test('an absolute-form target naming api.anthropic.com is answered as one in origin form', async () => {
+    const mock = await start()
+    const reply = await raw(mock.server.port, `GET http://${API}/nowhere?x=1 HTTP/1.1\r\nHost: ${API}\r\nConnection: close\r\n\r\n`)
+    expect(reply).toContain(`mock-anthropic UNMATCHED: GET ${API} /nowhere: no endpoint`)
+    expect(record(await mock.line('UNMATCHED '))).toMatchObject({ tunnel: null, host: API, path: '/nowhere', query: '?x=1' })
+    await mock.server.stop()
+  })
+
+  test('an absolute-form target naming another host, as an HTTP_PROXY client sends, is refused with a 403 naming it', async () => {
+    const mock = await start()
+    const reply = await raw(mock.server.port, `GET http://${OTHER}/hello HTTP/1.1\r\nHost: ${OTHER}\r\n\r\n`)
+    const why = `not ${API}, the only host the plain port answers; others are reached through CONNECT`
+    expect(reply).toStartWith('HTTP/1.1 403 Forbidden\r\n')
+    expect(reply).toEndWith(`mock-anthropic REFUSED: http://${OTHER}/hello: ${why}\n`)
+    expect(record(await mock.line('REFUSED '))).toEqual({ event: 'connection', tunnel: null, host: OTHER, port: null, outcome: 'refused', why })
+    await mock.server.stop()
+    expect(mock.lines).toHaveLength(1)
+  })
+
+  test("a response the mock cannot pass on is a 500 in the API's error envelope, and a FAILED line", async () => {
+    const mock = await start()
+    const response = await fetch(`http://127.0.0.1:${mock.server.port}/locked`)
+    expect(response.status).toBe(500)
+    expect(response.headers.get('x-should-retry')).toBe('false')
+    const { type, error } = (await response.json()) as { type: string; error: { type: string; message: string } }
+    expect({ type, errorType: error.type }).toEqual({ type: 'error', errorType: 'api_error' })
+    expect(error.message).toStartWith(`mock-anthropic FAILED: GET ${API} /locked: the mock failed: `)
+    expect(record(await mock.line('FAILED '))).toMatchObject({ event: 'request', endpoint: 'locked', status: 500 })
+    await mock.server.stop()
+  })
+
   test('a target that looks like an authority (//v1/messages) stays a path under api.anthropic.com', async () => {
     const mock = await start()
     const reply = await raw(mock.server.port, `POST //v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
@@ -348,12 +386,13 @@ describe('a plain connection that is not served', () => {
   })
 
   for (const [name, line, why] of [
-    ['a malformed request line', 'GARBAGE', 'malformed request line: "GARBAGE"'],
-    ['an HTTP version the mock does not speak', 'GET /hello HTTP/9.9', 'malformed request line: "GET /hello HTTP/9.9"'],
+    ['a malformed request line', 'GARBAGE\r\n', 'malformed request line: "GARBAGE\\r"'],
+    ['an HTTP version the mock does not speak', 'GET /hello HTTP/9.9\r\n', 'malformed request line: "GET /hello HTTP/9.9\\r"'],
+    ['a request line ended by a bare LF', 'GET /hello HTTP/1.1\n', 'malformed request line: "GET /hello HTTP/1.1"'],
   ] as const) {
     test(`${name} is refused at once with a 400 naming it`, async () => {
       const mock = await start()
-      const reply = await raw(mock.server.port, `${line}\r\nHost: ${API}\r\n\r\n`)
+      const reply = await raw(mock.server.port, `${line}Host: ${API}\r\n\r\n`)
       expect(reply).toStartWith('HTTP/1.1 400 Bad Request\r\n')
       expect(reply).toEndWith(`mock-anthropic REFUSED: ${why}\n`)
       expect(record(await mock.line('REFUSED '))).toMatchObject({ event: 'connection', tunnel: null, why })
@@ -437,14 +476,19 @@ describe('CONNECT refusals', () => {
     await mock.server.stop()
   })
 
-  test("a table host on port 80 is tunneled, though 80 is http's default port", async () => {
+  test("a table host on a port other than 443 is refused, and its record keeps the port, though 80 is http's default", async () => {
     const mock = await start()
-    const socket = net.connect(mock.server.port, '127.0.0.1', () => socket.write(`CONNECT ${API}:80 HTTP/1.1\r\nHost: ${API}:80\r\n\r\n`))
-    socket.on('error', () => {})
-    const reply = await new Promise<string>(resolve => socket.once('data', chunk => resolve(chunk.toString())))
-    expect(reply).toStartWith('HTTP/1.1 200 Connection Established')
-    socket.destroy()
-    expect(record(await mock.line('FAILED '))).toMatchObject({ event: 'connection', host: API, port: 80, requests: 0 })
+    const reply = await raw(mock.server.port, `CONNECT ${API}:80 HTTP/1.1\r\nHost: ${API}:80\r\n\r\n`)
+    expect(reply).toStartWith('HTTP/1.1 403 Forbidden\r\n')
+    expect(reply).toEndWith(`mock-anthropic REFUSED: CONNECT ${API}:80: not port 443, the only port the mock answers\n`)
+    expect(record(await mock.line('REFUSED '))).toEqual({
+      event: 'connection',
+      tunnel: null,
+      host: API,
+      port: 80,
+      outcome: 'refused',
+      why: 'not port 443, the only port the mock answers',
+    })
     await mock.server.stop()
   })
 
@@ -508,5 +552,18 @@ describe('stop', () => {
       { event: 'connection', tunnel: null, requests: 1, closed_by: 'stop', outcome: 'closed' },
     ])
     await expect(reader.read()).rejects.toThrow()
+  })
+})
+
+describe('starting', () => {
+  test('on a port already taken, the start fails and leaves no socket directory behind', async () => {
+    const taken = net.createServer()
+    await new Promise<void>(resolve => taken.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = taken.address() as net.AddressInfo
+    const socketDirs = async () => (await readdir(tmpdir())).filter(name => name.startsWith('mock-anthropic-') && !name.startsWith('mock-anthropic-server-'))
+    const before = await socketDirs()
+    await expect(startServer({ port, table: TABLE, generators: generators().generators, certsDir, emit: () => {} })).rejects.toThrow()
+    expect(await socketDirs()).toEqual(before)
+    await new Promise(resolve => taken.close(resolve))
   })
 })
