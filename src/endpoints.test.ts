@@ -30,6 +30,7 @@ describe('resolveEndpoint over the endpoint table', () => {
     ['a literal that differs by case', 'GET', `/api/oauth/organizations/${ORG}/Referral/eligibility`],
     ['an archive name without its suffix', 'GET', '/claude-code-releases/plugins/claude-plugins-official/abc'],
     ['an archive name that is only its suffix', 'GET', '/claude-code-releases/plugins/claude-plugins-official/.zip'],
+    ['a param whose escapes do not decode', 'GET', '/api/oauth/organizations/%E0/referral/eligibility'],
   ]
   for (const [name, method, path] of nearMisses) {
     test(`a near miss resolves to no endpoint: ${name}`, () => {
@@ -44,6 +45,13 @@ describe('resolveEndpoint over the endpoint table', () => {
     expect(endpoint?.scope === 'out-of-scope' && endpoint.reason).toBe(
       'remote sessions, bridge and teleport: a mock session runs locally',
     )
+  })
+
+  test('every method MCP streamable HTTP sends to the connector proxy is refused as out of scope', () => {
+    for (const method of ['POST', 'GET', 'DELETE']) {
+      const endpoint = resolve('mcp-proxy.anthropic.com', method, '/v1/mcp/srv')
+      expect(endpoint?.scope === 'out-of-scope' && endpoint.reason).toBe('claude.ai connectors')
+    }
   })
 
   test('an unknown host resolves to no endpoint, even on a known path', () => {
@@ -106,6 +114,23 @@ describe('resolveEndpoint over the endpoint table', () => {
     expect(resolution(API, 'POST', '/v1/messages')?.params).toEqual({})
   })
 
+  test('a param value is percent-decoded', () => {
+    expect(resolution(API, 'GET', '/api/oauth/organizations/a%20b%2Fc/referral/eligibility')?.params).toEqual({
+      org: 'a b/c',
+    })
+  })
+
+  test("a resolution's params are typed by its row's template", () => {
+    const table = buildEndpointTable([
+      { id: 'a', host: API, method: 'GET', path: '/x/{org}/{sha}.zip', scope: 'in-scope' } as const,
+    ])
+    const params = resolveEndpoint(table, 'GET', new URL(`https://${API}/x/o/s.zip`))?.params
+    const typed: { readonly org: string; readonly sha: string } | undefined = params
+    // @ts-expect-error The template declares no {orgs}.
+    expect(params?.orgs).toBeUndefined()
+    expect(typed).toEqual({ org: 'o', sha: 's' })
+  })
+
   test('the query string, the port and the case of the host do not change the row', () => {
     expect(resolve('API.Anthropic.com:443', 'POST', '/v1/messages?beta=true')?.id).toBe('messages')
   })
@@ -122,10 +147,19 @@ describe('resolveEndpoint over the endpoint table', () => {
     expect(listed.toSorted()).toEqual([...ENDPOINT_HOSTS].toSorted())
   })
 
-  test('the in-scope rows are exactly the ones PROJECT.md names', () => {
+  test('the in-scope rows are exactly the ones listed above', () => {
     const declared = ENDPOINT_TABLE.endpoints.filter(endpoint => endpoint.scope === 'in-scope').map(e => e.id)
     expect(declared.toSorted()).toEqual(inScope.map(([id]) => id).toSorted())
   })
+})
+
+test('every endpoint PROJECT.md says 2.1.289 also calls is an in-scope row', async () => {
+  const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
+  const section = doc.split('\nClaude Code 2.1.289 also calls')[1]?.split('\n### ')[0] ?? ''
+  const listed = [...section.matchAll(/^- `([A-Z]+) ([^`]+)`/gm)].map(([, method, path]) => `${method} ${path}`)
+  const inScope = ENDPOINT_TABLE.endpoints.filter(e => e.scope === 'in-scope').map(e => `${e.method} ${e.path}`)
+  expect(listed).toHaveLength(5)
+  for (const endpoint of listed) expect(inScope).toContain(endpoint)
 })
 
 describe('buildEndpointTable', () => {
@@ -144,6 +178,12 @@ describe('buildEndpointTable', () => {
     ['a param name outside [a-z_]', [row('a', '/x/{Org}')], /endpoint a: segment \{Org\} of/],
     ['an empty segment', [row('a', '/x//y')], /endpoint a: \/x\/\/y has an empty segment/],
     ['a path without a leading slash', [row('a', 'x/y')], /endpoint a: x\/y does not start with \//],
+    ['a host with capitals', [{ ...row('a', '/x'), host: 'API.anthropic.com' }], /endpoint a: host API\.anthropic\.com is not in/],
+    ['a host with a port', [{ ...row('a', '/x'), host: `${API}:443` }], /endpoint a: host api\.anthropic\.com:443 is not in/],
+    ['a dot segment', [row('a', '/x/../y')], /endpoint a: segment \.\. of \/x\/\.\.\/y is not in the form a URL gives it/],
+    ['a literal with a space', [row('a', '/x y')], /endpoint a: segment x y of/],
+    ['a literal with a query', [row('a', '/x?y')], /endpoint a: segment x\?y of/],
+    ['fixed text around a param with a space', [row('a', '/x/{v} y')], /endpoint a: segment \{v\} y of/],
     ['a param name used twice', [row('a', '/x/{v}/y/{v}')], /endpoint a: \/x\/\{v\}\/y\/\{v\} names \{v\} twice/],
     [
       'a blank out-of-scope reason',

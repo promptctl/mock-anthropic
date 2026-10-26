@@ -1,7 +1,7 @@
 // PROJECT.md "Endpoint table": every endpoint Claude Code is known to call, each in scope (a generator
 // answers it) or out of scope (refused with its reason), and the resolver from a request to its row.
-// [LAW:one-source-of-truth] The one list of hosts and paths: server routing, `coverage`, the CONNECT
-// host allowlist and the certificate's host list all read it.
+// [LAW:one-source-of-truth] The one list of hosts and paths, for server routing, `coverage`, the
+// CONNECT host allowlist and the certificate's host list.
 
 export type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -102,7 +102,10 @@ const ROWS = [
   outOfScope('cloud-credit', API, 'GET', '/v1/code/promo/cloud_credit', BILLING),
 
   outOfScope('mcp-start-auth', API, 'POST', '/api/organizations/{org}/mcp/start-auth/{server_id}', CONNECTORS),
+  // MCP streamable HTTP: POST sends a message, GET opens the server's event stream, DELETE ends the session.
   outOfScope('mcp-proxy', MCP_PROXY, 'POST', '/v1/mcp/{server_id}', CONNECTORS),
+  outOfScope('mcp-proxy-get', MCP_PROXY, 'GET', '/v1/mcp/{server_id}', CONNECTORS),
+  outOfScope('mcp-proxy-delete', MCP_PROXY, 'DELETE', '/v1/mcp/{server_id}', CONNECTORS),
   outOfScope('mcp-client-metadata', CLAUDE_AI, 'GET', '/oauth/claude-code-client-metadata', CONNECTORS),
   outOfScope('connector-directory', API, 'GET', '/api/directory/servers', CONNECTORS),
 
@@ -184,9 +187,15 @@ export type InScopeId = Extract<Row, { scope: 'in-scope' }>['id']
 // One segment of a path template. A param matches any one segment that starts with its prefix, ends
 // with its suffix, and has at least one character between them: `{org}` has neither, `{sha}.zip` has
 // the suffix `.zip`.
-export type Segment =
-  | { kind: 'literal'; text: string }
-  | { kind: 'param'; name: string; prefix: string; suffix: string }
+type ParamSegment = { kind: 'param'; name: string; prefix: string; suffix: string }
+export type Segment = { kind: 'literal'; text: string } | ParamSegment
+
+// The names of a path template's params, read from its type: `/x/{org}/{sha}.zip` gives `org | sha`.
+export type ParamName<Path extends string> = string extends Path
+  ? string
+  : Path extends `${string}{${infer Name}}${infer Rest}`
+    ? Name | ParamName<Rest>
+    : never
 
 export type Endpoint<R extends EndpointRow = Row> = R & { readonly segments: readonly Segment[] }
 
@@ -201,8 +210,22 @@ export type EndpointTable<R extends EndpointRow = Row> = {
 
 const PARAM_SEGMENT = /^([^{}]*)\{([a-z_]+)\}([^{}]*)$/
 
+// The text a WHATWG URL's pathname holds for this one segment. The resolver compares against
+// `url.pathname`, so a template's fixed text must already be in this form or it could never match.
+const canonicalSegment = (text: string) => new URL(`https://host/${text}`).pathname.slice(1)
+
 function parseSegment(text: string, row: EndpointRow): Segment {
   if (text === '') throw new Error(`endpoint ${row.id}: ${row.path} has an empty segment`)
+  const segment = parseSegmentSyntax(text, row)
+  // A param stands for at least one character, so `x` stands in for it here.
+  const sample = segment.kind === 'literal' ? segment.text : `${segment.prefix}x${segment.suffix}`
+  if (canonicalSegment(sample) !== sample) {
+    throw new Error(`endpoint ${row.id}: segment ${text} of ${row.path} is not in the form a URL gives it`)
+  }
+  return segment
+}
+
+function parseSegmentSyntax(text: string, row: EndpointRow): Segment {
   if (!/[{}]/.test(text)) return Object.freeze({ kind: 'literal', text })
   const match = PARAM_SEGMENT.exec(text)
   if (match === null) {
@@ -221,6 +244,9 @@ function parseTemplate(row: EndpointRow): readonly Segment[] {
 }
 
 function parseEndpoint<R extends EndpointRow>(row: R): Endpoint<R> {
+  if (new URL(`https://${row.host}`).hostname !== row.host) {
+    throw new Error(`endpoint ${row.id}: host ${row.host} is not in the form a URL gives it, lowercase with no port`)
+  }
   if (row.scope === 'out-of-scope' && !/\S/.test(row.reason)) {
     throw new Error(`endpoint ${row.id}: an out-of-scope row needs a reason`)
   }
@@ -234,17 +260,37 @@ function repeated(values: readonly string[]): string[] {
   return [...new Set(values.filter((value, i) => values.indexOf(value) !== i))]
 }
 
-function segmentMatches(segment: Segment, text: string): boolean {
-  switch (segment.kind) {
-    case 'literal':
-      return segment.text === text
-    case 'param':
-      return (
-        text.length > segment.prefix.length + segment.suffix.length &&
-        text.startsWith(segment.prefix) &&
-        text.endsWith(segment.suffix)
-      )
+// The value a request segment gives a param: the text between its prefix and suffix, percent-decoded.
+// Null when the segment is not one the param accepts, including one whose escapes do not decode.
+function paramValue(segment: ParamSegment, text: string): string | null {
+  const { prefix, suffix } = segment
+  if (text.length <= prefix.length + suffix.length || !text.startsWith(prefix) || !text.endsWith(suffix)) return null
+  try {
+    return decodeURIComponent(text.slice(prefix.length, text.length - suffix.length))
+  } catch {
+    return null
   }
+}
+
+function segmentMatches(segment: Segment, text: string): boolean {
+  return segment.kind === 'literal' ? segment.text === text : paramValue(segment, text) !== null
+}
+
+// Each param's value when every request segment matches its template segment, else null.
+function matchSegments(segments: readonly Segment[], texts: readonly string[]): Record<string, string> | null {
+  const params: Record<string, string> = {}
+  for (const [i, segment] of segments.entries()) {
+    // texts[i] is in range: the caller checked the lengths are equal.
+    const text = texts[i] as string
+    if (segment.kind === 'literal') {
+      if (segment.text !== text) return null
+      continue
+    }
+    const value = paramValue(segment, text)
+    if (value === null) return null
+    params[segment.name] = value
+  }
+  return params
 }
 
 // Whether one request segment could match both. Two params share a match exactly when their prefixes
@@ -290,17 +336,18 @@ export function buildEndpointTable<R extends EndpointRow>(rows: readonly R[]): E
 
 export const ENDPOINT_TABLE: EndpointTable = buildEndpointTable(ROWS)
 
-// Every host the table knows, in table order: the CONNECT allowlist and the certificate's host list.
+// Every host the table knows, in table order, for the CONNECT allowlist and the certificate's host list.
 export const ENDPOINT_HOSTS: readonly string[] = Object.freeze([
   ...new Set(ENDPOINT_TABLE.endpoints.map(endpoint => endpoint.host)),
 ])
 
-// The row a request is addressed to, and the segment each of the row's params matched, its prefix and
-// suffix removed. A URL's hostname is already lowercase with no port, and its pathname has no query.
-export type Resolution<R extends EndpointRow = Row> = {
-  readonly endpoint: Endpoint<R>
-  readonly params: Readonly<Record<string, string>>
-}
+// The row a request is addressed to, and each of the row's params with the value its segment gave it,
+// percent-decoded and its prefix and suffix removed. One member per row, so a generator typed by its
+// row reads its params by name. A URL's hostname is already lowercase with no port, and its pathname
+// has no query.
+export type Resolution<R extends EndpointRow = Row> = R extends EndpointRow
+  ? { readonly endpoint: Endpoint<R>; readonly params: Readonly<Record<ParamName<R['path']>, string>> }
+  : never
 
 export function resolveEndpoint<R extends EndpointRow>(
   table: EndpointTable<R>,
@@ -309,18 +356,11 @@ export function resolveEndpoint<R extends EndpointRow>(
 ): Resolution<R> | null {
   const texts = url.pathname.slice(1).split('/')
   for (const endpoint of table.endpoints) {
-    const pairs = zip(endpoint.segments, texts)
-    const matched =
-      endpoint.host === url.hostname &&
-      endpoint.method === method &&
-      pairs !== null &&
-      pairs.every(([segment, text]) => segmentMatches(segment, text))
-    if (matched) {
-      const params = pairs.flatMap(([segment, text]) =>
-        segment.kind === 'param' ? [[segment.name, text.slice(segment.prefix.length, text.length - segment.suffix.length)]] : [],
-      )
-      return { endpoint, params: Object.fromEntries(params) }
-    }
+    if (endpoint.host !== url.hostname || endpoint.method !== method || endpoint.segments.length !== texts.length) continue
+    const params = matchSegments(endpoint.segments, texts)
+    // The params are exactly the {name}s parseTemplate read from this row's path, which are the names
+    // ParamName reads from its type; this cast is the one place the two are joined.
+    if (params !== null) return { endpoint, params } as unknown as Resolution<R>
   }
   return null
 }
