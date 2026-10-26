@@ -90,7 +90,7 @@ const ROWS = [
   outOfScope('user-settings-put', API, 'PUT', '/api/claude_code/user_settings', 'settings sync'),
   outOfScope('team-memory', API, 'GET', '/api/claude_code/team_memory', 'team memory sync'),
   outOfScope('team-memory-put', API, 'PUT', '/api/claude_code/team_memory', 'team memory sync'),
-  outOfScope('otel-metrics', API, 'POST', '/api/claude_code/metrics', 'opt-in OpenTelemetry metrics export'),
+  outOfScope('otel-metrics', API, 'POST', '/api/claude_code/metrics', 'BigQuery metrics export: `metrics_enabled` keeps it off'),
 
   outOfScope('grove', API, 'POST', '/api/claude_code_grove', CONSENT),
   outOfScope('account-settings', API, 'GET', '/api/oauth/account/settings', CONSENT),

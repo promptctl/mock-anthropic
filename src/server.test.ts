@@ -339,6 +339,15 @@ describe('as a plain origin', () => {
     await mock.server.stop()
   })
 
+  // 2.1.289 may gzip an event batch.
+  test('a gzip-encoded body is served', async () => {
+    const mock = await start()
+    const response = await fetch(`http://127.0.0.1:${mock.server.port}/hello`, { method: 'POST', headers: { 'content-encoding': 'gzip' }, body: Bun.gzipSync('{"events":[]}') })
+    expect(response.status).toBe(200)
+    expect(record(await mock.line('SERVED '))).toMatchObject({ endpoint: 'hello' })
+    await mock.server.stop()
+  })
+
   test('a HEAD request gets its headers with no body and its line, and stop() still returns', async () => {
     const mock = await start()
     const plain = await fetch(`http://127.0.0.1:${mock.server.port}/nowhere`, { method: 'HEAD' })

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { MessagesRequest } from './messages.ts'
+import { type MessagesRequest, tokens } from './messages.ts'
 import type { MessageReply, Reply } from './scripts.ts'
 
 // PROJECT.md "Messages": a script's reply as the response the request asked for. A message reply is
@@ -93,17 +93,12 @@ function assistantMessage(reply: MessageReply, request: MessagesRequest): Assist
     stop_reason: reply.stop_reason,
     stop_sequence: null,
     usage: {
-      input_tokens: tokens(request.raw),
+      input_tokens: request.inputTokens,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
       output_tokens: Math.max(1, content.reduce((sum, block) => sum + tokens(streamedText(block)), 0)),
     },
   }
-}
-
-// Plausible, not counted: about four characters to a token, as English text runs.
-function tokens(text: string): number {
-  return Math.ceil(text.length / 4)
 }
 
 // A server-sent event of the Messages stream: its `type` is also its SSE event name.

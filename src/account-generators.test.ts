@@ -132,6 +132,20 @@ const ANSWERS: readonly { name: string; method: Method; url: string; body?: stri
     answer: { plugins: [], has_more: false },
     facts: IDENTITY,
   },
+  {
+    name: 'referral eligibility',
+    method: 'GET',
+    url: `${API}/api/oauth/organizations/${ORG_UUID}/referral/eligibility?campaign=claude_code_guest_pass`,
+    answer: { eligible: false, referral_code_details: null, referrer_reward: null, remaining_passes: null },
+    facts: IDENTITY,
+  },
+  {
+    name: 'overage credit grant',
+    method: 'GET',
+    url: `${API}/api/oauth/organizations/${ORG_UUID}/overage_credit_grant`,
+    answer: { available: false, eligible: false, granted: false, amount_minor_units: null, currency: null },
+    facts: IDENTITY,
+  },
 ]
 
 describe('the account generators', () => {
@@ -160,6 +174,8 @@ describe('an organization-scoped path naming another organization', () => {
     `/api/organizations/${OTHER}/model_selector/cc`,
     `/api/oauth/organizations/${OTHER}/marketplaces`,
     `/api/oauth/organizations/${OTHER}/plugins/list-plugins`,
+    `/api/oauth/organizations/${OTHER}/referral/eligibility`,
+    `/api/oauth/organizations/${OTHER}/overage_credit_grant`,
   ]) {
     test(`${path} is declined, naming both organizations`, async () => {
       const { verdict, response, facts } = await send('GET', `${API}${path}`)
