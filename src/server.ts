@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type Certificates, ensureCertificates } from './certificates.ts'
 import { dispatch, type Generators, type Verdict } from './dispatch.ts'
-import { API, type EndpointRow, type EndpointTable, tableHosts } from './endpoints.ts'
+import { API, type EndpointRow, type EndpointTable, resolveEndpoint, tableHosts } from './endpoints.ts'
 
 // PROJECT.md "How a program reaches it" and "Failure behavior": one listener on 127.0.0.1 that is
 // both an HTTPS forward proxy for the table's hosts and a plain origin for api.anthropic.com. It moves
@@ -95,19 +95,14 @@ const UNFINISHED_LINE = 'closed before finishing its request line'
 const REQUEST_START = /^[A-Z]/
 const REQUEST_LINE = /^[A-Z]+ \S+ HTTP\/1\.[01]$/
 const MAX_LINE = 8192
-// Why a request ended early, by who ended it.
-const BODY_CUT_OFF: Record<Closer, string> = {
-  client: 'client closed before the request body finished',
-  stop: 'the mock stopped before the request body finished',
+// Why a request ended early: who ended it, and before what.
+const BODY_CUT_OFF = 'the request body finished'
+const NOT_READY = 'the response was ready'
+const BODY_UNFINISHED = 'the body finished'
+function endedEarly(closer: Closer, before: string): string {
+  return `${closer === 'client' ? 'client closed' : 'the mock stopped'} before ${before}`
 }
-const NOT_READY: Record<Closer, string> = {
-  client: 'client closed before the response was ready',
-  stop: 'the mock stopped before the response was ready',
-}
-const BODY_UNFINISHED: Record<Closer, string> = {
-  client: 'client closed before the body finished',
-  stop: 'the mock stopped before the body finished',
-}
+const MAX_HEAD = 65536
 
 export async function startServer<R extends EndpointRow>(options: ServerOptions<R>): Promise<MockServer> {
   const { table, generators, emit } = options
@@ -262,6 +257,7 @@ function opening(client: net.Socket): Promise<Opening> {
       if (target === undefined) return settle({ kind: 'plain', read })
       const headEnd = read.indexOf('\r\n\r\n')
       if (headEnd !== -1) settle({ kind: 'connect', target, rest: read.subarray(headEnd + 4) })
+      else if (read.length > MAX_HEAD) settle({ kind: 'refused', why: `CONNECT head longer than ${MAX_HEAD} bytes` })
     }
     client.on('data', onData)
     client.once('close', onClose)
@@ -286,8 +282,11 @@ function connectTarget(text: string): { host: string; port: number } | { host: s
 
 function refuse(client: net.Socket, status: string, what: string): void {
   const body = `mock-anthropic REFUSED: ${what}\n`
+  // The front paused the socket to read its opening, so its readable side never ends on its own: once
+  // the refusal is flushed, the socket is destroyed, which closes it and drops it from the owned set.
   client.end(
     `HTTP/1.1 ${status}\r\ncontent-type: text/plain\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`,
+    () => client.destroy(),
   )
 }
 
@@ -308,11 +307,26 @@ async function connection(
 ): Promise<{ duration_ms: number; requests: number; error: string | null; closed_by: Closer | 'server' }> {
   const started = performance.now()
   const clientClosed = closed(client)
-  let markEnded!: () => void
-  const ended = new Promise<void>(resolve => (markEnded = resolve))
+  // The requests waiting on this connection's end, each removed once its record is written, so a
+  // long-lived connection holds nothing of the requests it has finished.
+  const waiting = new Set<() => void>()
+  let over = false
+  const markEnded = () => {
+    over = true
+    for (const abandon of waiting) abandon()
+  }
+  const onEnd = (abandon: () => void) => {
+    if (over) abandon()
+    waiting.add(abandon)
+    return () => waiting.delete(abandon)
+  }
   let requests = 0
   let error: string | null = null
-  const kill = () => client.destroy()
+  let killed = false
+  const kill = () => {
+    killed = true
+    client.destroy()
+  }
   const inner = startInner(() => Bun.serve({
     unix: path,
     ...(kind.tls === null ? {} : { tls: kind.tls }),
@@ -324,7 +338,7 @@ async function connection(
     idleTimeout: 0,
     fetch: (request: Request) => {
       requests += 1
-      return handle(request, { kill, ended })
+      return handle(request, { kill, onEnd })
     },
   } as unknown as Parameters<typeof Bun.serve>[0]))
   // [LAW:no-silent-failure] An inner server that cannot start (out of file descriptors, say) ends the
@@ -352,9 +366,10 @@ async function connection(
     client.pipe(upstream)
     upstream.pipe(client)
   }
-  // Whichever side closed first ended the connection, unless `stop()` was closing everything.
+  // Whichever side closed first ended the connection, unless `stop()` was closing everything or the
+  // mock broke it after a failed body.
   const first = await Promise.race([clientClosed.then(() => 'client' as const), upstreamClosed.then(() => 'server' as const)])
-  const closed_by = closer() === 'stop' ? 'stop' : first
+  const closed_by = closer() === 'stop' ? 'stop' : killed ? 'server' : first
   client.destroy()
   upstream.destroy()
   await Promise.all([clientClosed, upstreamClosed])
@@ -365,7 +380,6 @@ async function connection(
   return { duration_ms: elapsed(started), requests, error, closed_by }
 }
 
-// Settles once the socket has closed, including a close that happened before this was asked.
 function startInner(start: () => Bun.Server<undefined>): Bun.Server<undefined> | Error {
   try {
     return start()
@@ -374,9 +388,11 @@ function startInner(start: () => Bun.Server<undefined>): Bun.Server<undefined> |
   }
 }
 
-// What a request knows of the connection that carries it: how to break it, and when it has ended.
-type Carrier = { readonly kill: () => void; readonly ended: Promise<void> }
+// What a request knows of the connection that carries it: how to break it, and how to hear that it
+// has ended (the returned function stops listening).
+type Carrier = { readonly kill: () => void; readonly onEnd: (abandon: () => void) => () => void }
 
+// Settles once the socket has closed, including a close that happened before this was asked.
 function closed(socket: net.Socket): Promise<'closed'> {
   return socket.closed ? Promise.resolve('closed') : new Promise(resolve => socket.once('close', () => resolve('closed')))
 }
@@ -396,18 +412,23 @@ function serveRequest<R extends EndpointRow>(
   closer: () => Closer,
 ): { response: Promise<Response>; recorded: Promise<void> } {
   const started = performance.now()
-  const target = new URL(incoming.url)
   // [LAW:types-are-the-program] Every request on a connection is addressed to the connection's
   // authority: the URL is built from it, and the path and query are set as values, so neither the Host
-  // header nor any target text (`//v1/messages` would parse as host `v1`) can choose the host.
+  // header nor any target text (`//v1/messages` would parse as host `v1`) can choose the host. Bun.serve
+  // gives the target joined to whatever the Host header said, so the scheme and authority are cut off
+  // as text, which no Host value can make throw.
+  const [path = '', query] = incoming.url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/\?(.*)/s)
   const url = new URL(`https://${kind.authority}`)
-  url.pathname = target.pathname
-  url.search = target.search
+  url.pathname = path
+  url.search = query ?? ''
   const { method } = incoming
+  const resolved = resolveEndpoint(table, method, url)?.endpoint.id ?? null
   const base = { event: 'request', tunnel: kind.tunnel, host: url.hostname, method, path: url.pathname, query: url.search } as const
   let record!: (event: RequestEvent) => void
+  let stopListening = () => {}
   const recorded = new Promise<void>(resolve => {
     record = event => {
+      stopListening()
       emit(event)
       resolve()
     }
@@ -417,10 +438,12 @@ function serveRequest<R extends EndpointRow>(
   // closing its connection, and `stop()` and a failed body's kill close it too, so the mock's own event
   // covers every case and no signal of Bun.serve's is needed. Until a response exists, an abandoned
   // request is recorded here; after, its response's stream is cancelled and `observed` records it.
-  const abandoned = carrier.ended.then(() => 'abandoned' as const)
+  const abandoned = new Promise<'abandoned'>(resolve => {
+    stopListening = carrier.onEnd(() => resolve('abandoned'))
+  })
   const unlessAbandoned = <T>(work: Promise<T>) => Promise.race([work, abandoned])
-  const aborted = (why: Record<Closer, string>) => {
-    record({ ...base, endpoint: null, status: null, duration_ms: elapsed(started), outcome: 'aborted', why: why[closer()] })
+  const aborted = (before: string) => {
+    record({ ...base, endpoint: resolved, status: null, duration_ms: elapsed(started), outcome: 'aborted', why: endedEarly(closer(), before) })
     // The client is gone, or the mock is stopping; nothing reads this.
     return new Response(null)
   }
@@ -433,7 +456,7 @@ function serveRequest<R extends EndpointRow>(
     const dispatched = await unlessAbandoned(dispatching)
     if (dispatched === 'abandoned') {
       // The response arrives with nobody to read it; cancelling its body stops whatever produces it.
-      void dispatching.then(late => late.response.body?.cancel(NOT_READY[closer()]))
+      void dispatching.then(late => quietly(late.response.body?.cancel(endedEarly(closer(), NOT_READY))))
       return aborted(NOT_READY)
     }
     const { endpoint, verdict, response } = dispatched
@@ -443,7 +466,7 @@ function serveRequest<R extends EndpointRow>(
     })
   })().catch((error: unknown) => {
     const why = `the mock failed: ${error instanceof Error ? error.message : String(error)}`
-    record({ ...base, endpoint: null, status: 500, duration_ms: elapsed(started), outcome: 'failed', why })
+    record({ ...base, endpoint: resolved, status: 500, duration_ms: elapsed(started), outcome: 'failed', why })
     return new Response(`mock-anthropic FAILED: ${method} ${url.hostname} ${url.pathname}: ${why}\n`, {
       status: 500,
       headers: { 'x-should-retry': 'false' },
@@ -499,8 +522,8 @@ function observed(
   // The body ends early when its request is abandoned; Bun.serve may also stop reading it, or cancel
   // this pass-through copy, but neither is relied on.
   async function abandon() {
-    const why = BODY_UNFINISHED[closer()]
-    if (end({ ended: 'aborted', why })) await reader.cancel(why)
+    const why = endedEarly(closer(), BODY_UNFINISHED)
+    if (end({ ended: 'aborted', why })) await quietly(reader.cancel(why))
   }
   void abandoned.then(abandon)
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
@@ -509,8 +532,14 @@ function observed(
 // A response to HEAD carries the headers a GET would, and no body (RFC 9110 9.3.2). The generated body
 // is cancelled, so whatever produces it stops.
 function headersOnly(response: Response): Response {
-  void response.body?.cancel('HEAD has no body')
+  void quietly(response.body?.cancel('HEAD has no body'))
   return new Response(null, { status: response.status, statusText: response.statusText, headers: response.headers })
+}
+
+// A cancel is sent to a body nobody will read; its request's record already says how it ended, so a
+// source whose cancel fails changes nothing and must not end the process as an unhandled rejection.
+async function quietly(cancelling: Promise<void> | undefined): Promise<void> {
+  await cancelling?.catch(() => {})
 }
 
 function elapsed(started: number): number {

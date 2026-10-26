@@ -264,7 +264,7 @@ describe('streamed bodies', () => {
     const mock = await start()
     ;(await halfBody(mock.server.port)).destroy()
     expect(record(await mock.line('ABORTED '))).toMatchObject({
-      endpoint: null,
+      endpoint: 'hello',
       status: null,
       why: 'client closed before the request body finished',
     })
@@ -280,7 +280,7 @@ describe('a generator still working', () => {
     await mock.controls.slowBegan
     controller.abort()
     expect(await fetched).toBe('aborted')
-    expect(record(await mock.line('ABORTED '))).toMatchObject({ endpoint: null, status: null, why: 'client closed before the response was ready' })
+    expect(record(await mock.line('ABORTED '))).toMatchObject({ endpoint: 'slow', status: null, why: 'client closed before the response was ready' })
     mock.controls.release()
     expect(await mock.controls.cancelled).toBe('client closed before the response was ready')
     await mock.server.stop()
@@ -399,6 +399,28 @@ describe('a plain connection that is not served', () => {
 })
 
 describe('CONNECT refusals', () => {
+  test('a CONNECT head that never ends is refused once it passes the limit', async () => {
+    const mock = await start()
+    const reply = await raw(mock.server.port, `CONNECT ${API}:443 HTTP/1.1\r\nX: ${'a'.repeat(70000)}`)
+    expect(reply).toEndWith('mock-anthropic REFUSED: CONNECT head longer than 65536 bytes\n')
+    await mock.server.stop()
+  })
+
+  test("a broken body's connection is recorded as closed by the mock, not the client", async () => {
+    const mock = await start()
+    await expect(fetch(`http://127.0.0.1:${mock.server.port}/broken`).then(response => response.text())).rejects.toThrow()
+    expect(record(await mock.line('CLOSED '))).toMatchObject({ event: 'connection', tunnel: null, closed_by: 'server' })
+    await mock.server.stop()
+  })
+
+  test('a Host header that is not a valid authority still gets its request recorded', async () => {
+    const mock = await start()
+    const reply = await raw(mock.server.port, 'GET /nowhere HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n')
+    expect(reply).toContain(`mock-anthropic UNMATCHED: GET ${API} /nowhere: no endpoint`)
+    expect(record(await mock.line('UNMATCHED '))).toMatchObject({ host: API, path: '/nowhere' })
+    await mock.server.stop()
+  })
+
   test('a host the table does not know gets a 403 naming it, and a REFUSED line', async () => {
     const mock = await start()
     const reply = await raw(mock.server.port, 'CONNECT unknown.example:443 HTTP/1.1\r\nHost: unknown.example:443\r\n\r\n')

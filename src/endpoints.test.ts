@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { DEFAULT_ACCOUNT } from './account.ts'
 import {
   buildEndpointTable,
-    ENDPOINT_TABLE,
+  ENDPOINT_TABLE,
   type EndpointRow,
   type InScopeId,
   type ResolutionOf,
