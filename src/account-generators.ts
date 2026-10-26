@@ -99,6 +99,8 @@ export function accountGenerators(account: Account) {
             uuid: account.organizationUuid,
             name: account.organizationName,
             organization_type: organizationType(account),
+            // No tier: 2.1.289 reads one into its usage-limit warning and Team seat checks. Its cost is a
+            // second profile fetch after each token refresh, which a stored tier would skip.
             rate_limit_tier: null,
             billing_type: 'stripe_subscription',
             subscription_created_at: CREATED_AT,
