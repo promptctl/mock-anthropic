@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, expect, mock, spyOn, test } from 'bun:test'
 import { coverageCommand } from './coverage.ts'
 import { answer, type Generators } from './dispatch.ts'
 import { buildEndpointTable } from './endpoints.ts'
@@ -25,9 +25,7 @@ function capturedStdout() {
   return () => written
 }
 
-afterEach(() => {
-  ;(process.stdout.write as unknown as { mockRestore(): void }).mockRestore()
-})
+afterEach(() => mock.restore())
 
 test('an in-scope row with no generator: the answer is no (exit 1), and the row is named', async () => {
   const stdout = capturedStdout()
@@ -50,4 +48,12 @@ test('every in-scope row answered: the answer is ok (exit 0)', async () => {
 
   expect(result).toEqual({ outcome: 'ok', facts: { answered: 2, out_of_scope: 1, no_generator: [] } })
   expect(exitCode(result)).toBe(0)
+})
+
+test('a row whose id every object inherits, such as toString, has no generator unless the map gives it one', async () => {
+  capturedStdout()
+  const table = buildEndpointTable([{ id: 'toString', host: API, method: 'GET', path: '/to-string', scope: 'in-scope' }] as const)
+  const result = await coverageCommand(table, {}).run([])
+
+  expect(result).toEqual({ outcome: 'no', facts: { answered: 0, out_of_scope: 0, no_generator: ['toString'] } })
 })

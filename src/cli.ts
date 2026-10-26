@@ -7,8 +7,8 @@ import { serve } from './serve.ts'
 
 // PROJECT.md "Commands": the mock's command line, `bun src/cli.ts <command> [args]`.
 
-// `coverage` asks of the generators `serve` answers with; which ones exist does not depend on the
-// account or the script directories they are built from.
+// `coverage` asks of the generators `serve` answers with. mockGenerators' type, Required<Generators<Row>>,
+// holds every key whatever the account and script directories, so the default inputs answer for all.
 export const COMMANDS: Commands = {
   serve,
   coverage: coverageCommand(ENDPOINT_TABLE, mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] })),

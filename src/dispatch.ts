@@ -42,9 +42,10 @@ export type Generators<R extends EndpointRow> = {
 
 // [LAW:one-source-of-truth] What "a row has a generator" means, for serving a request and for `coverage`
 // alike. The key type and the row type are joined by Generators' mapping; indexing by a row's id reads
-// the generator for that row, which this cast is the one place to say.
+// the generator for that row, which this cast is the one place to say. Own keys only, so an id such as
+// `toString` is not answered by what every object inherits.
 export function generatorFor<R extends EndpointRow>(generators: Generators<R>, row: Pick<EndpointRow, 'id'>): Generator<R> | undefined {
-  return (generators as Partial<Record<string, Generator<R>>>)[row.id]
+  return Object.hasOwn(generators, row.id) ? (generators as Partial<Record<string, Generator<R>>>)[row.id] : undefined
 }
 
 export type Verdict =
