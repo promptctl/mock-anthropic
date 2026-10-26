@@ -163,9 +163,10 @@ describe('resolveEndpoint over the endpoint table', () => {
 test('every endpoint PROJECT.md says 2.1.289 also calls is an in-scope row', async () => {
   const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
   const section = doc.split('\nClaude Code 2.1.289 also calls')[1]?.split('\n### ')[0] ?? ''
-  const listed = [...section.matchAll(/^- `([A-Z]+) ([^`]+)`/gm)].map(([, method, path]) => `${method} ${path}`)
-  const inScope = ENDPOINT_TABLE.endpoints.filter(e => e.scope === 'in-scope').map(e => `${e.method} ${e.path}`)
-  expect(listed).toHaveLength(6)
+  // A bullet that does not open with a `METHOD host/path` is kept whole, so it fails the match below.
+  const listed = [...section.matchAll(/^- (.*)$/gm)].map(([, bullet = '']) => /^`([A-Z]+ [^`]+)`/.exec(bullet)?.[1] ?? bullet)
+  const inScope = ENDPOINT_TABLE.endpoints.filter(e => e.scope === 'in-scope').map(e => `${e.method} ${e.host}${e.path}`)
+  expect(listed).not.toBeEmpty()
   for (const endpoint of listed) expect(inScope).toContain(endpoint)
 })
 
