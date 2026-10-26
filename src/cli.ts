@@ -3,6 +3,7 @@ import { type Commands, main } from './command.ts'
 import { coverageCommand } from './coverage.ts'
 import { ENDPOINT_TABLE } from './endpoints.ts'
 import { mockGenerators } from './generators.ts'
+import { login } from './login.ts'
 import { serve } from './serve.ts'
 
 // PROJECT.md "Commands": the mock's command line, `bun src/cli.ts <command> [args]`.
@@ -11,6 +12,7 @@ import { serve } from './serve.ts'
 // holds every key whatever the account and script directories, so the default inputs answer for all.
 export const COMMANDS: Commands = {
   serve,
+  login,
   coverage: coverageCommand(ENDPOINT_TABLE, mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] })),
 }
 
