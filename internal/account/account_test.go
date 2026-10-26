@@ -77,7 +77,7 @@ func TestDefaultParsesAndIsSynthetic(t *testing.T) {
 		t.Fatal(err)
 	}
 	again, err := Parse(data, "a copy of the default")
-	if err != nil || again != Default {
+	if err != nil || *again != *Default {
 		t.Fatalf("the default does not round-trip: %v, %v", again, err)
 	}
 	if !IsSyntheticUUID(Default.AccountUUID()) || !IsSyntheticUUID(Default.OrganizationUUID()) {
@@ -131,8 +131,15 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 		{"blank organization name", writeJSON(t, with("organizationName", " ")), []string{"organizationName"}},
 		{"email with display name", writeJSON(t, with("emailAddress", "A <a@b.invalid>")), []string{"emailAddress"}},
 		{"unknown subscription", writeJSON(t, with("subscriptionType", "free")), []string{"subscriptionType"}},
-		{"wrong JSON type", writeJSON(t, with("organizationName", 7)), []string{"not a JSON account", "organizationName"}},
-		{"not JSON", writeFile(t, "{ not json"), []string{"not a JSON account"}},
+		{"wrong JSON type", writeJSON(t, with("organizationName", 7)), []string{"organizationName", "not a string"}},
+		{"null value", writeJSON(t, with("accountUuid", json.RawMessage("null"))), []string{"accountUuid", "not a string"}},
+		{"wrong-case key", writeJSON(t, with("accountuuid", SyntheticUUID(5))), []string{`"accountuuid": unknown key`}},
+		{"duplicate key", writeFile(t, `{"accountUuid":"`+SyntheticUUID(3)+`","accountUuid":"`+SyntheticUUID(5)+`"}`), []string{"accountUuid: given more than once"}},
+		{"nil uuid", writeJSON(t, with("organizationUuid", "00000000-0000-0000-0000-000000000000")), []string{"organizationUuid"}},
+		{"upper-case uuid", writeJSON(t, with("accountUuid", strings.ToUpper(SyntheticUUID(0xabc)))), []string{"accountUuid"}},
+		{"undotted email domain", writeJSON(t, with("emailAddress", "a@b")), []string{"emailAddress"}},
+		{"not an object", writeFile(t, "null"), []string{"not a JSON object"}},
+		{"not JSON", writeFile(t, "{ not json"), []string{"not JSON"}},
 		{"data after the object", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object"}},
 		{"absent file", filepath.Join(dir, "absent.json"), []string{"cannot read"}},
 		{"a directory", dir, []string{"cannot read"}},
@@ -157,11 +164,17 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 	}
 }
 
-func TestEveryBadFieldIsNamedAtOnce(t *testing.T) {
+func TestEveryBadKeyIsNamedAtOnce(t *testing.T) {
 	a := otherAccount()
-	a["accountUuid"], a["subscriptionType"] = "x", "free"
-	_, err := ReadFile(writeJSON(t, a))
-	if err == nil || !strings.Contains(err.Error(), "accountUuid") || !strings.Contains(err.Error(), "subscriptionType") {
-		t.Errorf("got %v, want both accountUuid and subscriptionType named", err)
+	delete(a, "emailAddress")
+	a["accountUuid"], a["subscriptionType"], a["acountUuid"], a["organizationName"] = "x", "free", "x", 7
+	got, err := ReadFile(writeJSON(t, a))
+	if got != nil {
+		t.Errorf("a rejected file returned account %v, want nil", got)
+	}
+	for _, name := range []string{"accountUuid", "subscriptionType", `"acountUuid"`, "organizationName", "emailAddress: missing"} {
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("got %v, want %s named", err, name)
+		}
 	}
 }
