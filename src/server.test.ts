@@ -7,7 +7,8 @@ import type { Facts, Generators } from './dispatch.ts'
 import { DEFAULT_ACCOUNT } from './account.ts'
 import { API, buildEndpointTable, ENDPOINT_TABLE, tableHosts } from './endpoints.ts'
 import { mockGenerators } from './generators.ts'
-import { eventLine, type MockServer, type ServerEvent, startServer } from './server.ts'
+import { eventLine } from './log.ts'
+import { type MockServer, type ServerEvent, startServer } from './server.ts'
 
 const OTHER = 'claude.ai'
 

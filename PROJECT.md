@@ -107,9 +107,11 @@ A `coverage` command lists every endpoint as answered or out of scope, and exits
 
 ## Commands
 
-The mock is run with `bun`. Exit codes: 0 success, 1 the answer is "no" (for example, coverage has gaps), 2 a wrong command line.
+The mock is run with `bun`: `bun src/cli.ts <command> [args]`. Exit codes: 0 success, 1 the answer is "no" (for example, coverage has gaps) or the mock failed, 2 a wrong command line.
 
-- `serve [--port N] [--scenarios DIR]...`: start the mock. Port 0 picks a free port. Once listening, it prints exactly one JSON line on stdout, `{"port": N, "ca": "<path to CA certificate>"}`, and writes human-readable logs on stderr.
+Every invocation ends with one line on stderr recording it, in the same form as the request and connection lines: `OK`, `NO`, `EXITED` (`run`, carrying the child's code), `USAGE` or `FAILED`, then the record as JSON, with the arguments, the exit code, what first asked it to end (`ended_by`: the signal, `crash` for an error the mock did not catch, or `null` when the command finished by itself), and what the command learned (for `serve`: its port, the CA path, the account file or `null` for the default, the script directories, and whether each certificate was generated or reused). An error the mock did not catch ends the invocation as `FAILED`.
+
+- `serve [--port N] [--scenarios DIR]... [--account FILE]`: start the mock. Port 0 picks a free port. `--account` replaces the default account with the one in FILE. Once listening, it prints exactly one JSON line on stdout, `{"port": N, "ca": "<path to CA certificate>"}`, and writes human-readable logs on stderr. It runs until SIGINT, SIGTERM or SIGHUP, then closes every connection and exits 0; a second signal while it is closing ends it at once, as `FAILED`.
 - `login <config-dir> [--trust <project-dir>]...`: write a Claude Code config directory that the mock accepts as logged in. It holds an OAuth credentials file with the mock's token and scopes, the account, completed onboarding, and the given projects marked trusted. This is the one place that defines what a mock login looks like; consumers call it instead of writing those files themselves.
 - `run [--scenarios DIR]... -- <claude argv>`: start the mock, write a fresh login, and run the given Claude Code command against the mock. Before starting the child, it removes every environment variable that would route around the mock or replace its login: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, the `CLAUDE_CODE_USE_*` provider switches, the parent's proxy variables, and `NO_PROXY`. When the child exits, it prints a summary of requests served and unmatched, and exits with the child's code.
 - `coverage`: as described under Endpoint table.
