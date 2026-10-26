@@ -12,27 +12,33 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/promptctl/mock-anthropic/internal/generator"
 )
 
 // ID names one row of a table.
 type ID string
 
-// Row is one endpoint as written in a table. Built only by inScope and outOfScope, so an out-of-scope
+// Row is one endpoint as written in a table. Built only by InScope and OutOfScope, so an out-of-scope
 // row cannot be written without its reason.
 type Row struct {
 	id     ID
 	host   string
 	method string
 	path   string
-	// reason is nil exactly when the row is in scope; build refuses a blank out-of-scope reason.
+	// reason is nil exactly when the row is in scope; Build refuses a blank out-of-scope reason.
 	reason *string
+	// generate is what answers an in-scope row, nil while it has none: a state `coverage` reports.
+	generate generator.Func
 }
 
-func inScope(id ID, host, method, path string) Row {
-	return Row{id: id, host: host, method: method, path: path}
+// InScope is a row a generator answers; generate is nil for an in-scope row with no generator yet.
+func InScope(id ID, host, method, path string, generate generator.Func) Row {
+	return Row{id: id, host: host, method: method, path: path, generate: generate}
 }
 
-func outOfScope(id ID, host, method, path, reason string) Row {
+// OutOfScope is a row refused with its reason.
+func OutOfScope(id ID, host, method, path, reason string) Row {
 	return Row{id: id, host: host, method: method, path: path, reason: &reason}
 }
 
@@ -41,6 +47,9 @@ func (r Row) Host() string   { return r.host }
 func (r Row) Method() string { return r.method }
 func (r Row) Path() string   { return r.path }
 func (r Row) InScope() bool  { return r.reason == nil }
+
+// Generator is what answers the row, and false when it is out of scope or has no generator.
+func (r Row) Generator() (generator.Func, bool) { return r.generate, r.generate != nil }
 
 // OutOfScopeReason is why the row is refused, and false when it is in scope.
 func (r Row) OutOfScopeReason() (string, bool) {
@@ -103,7 +112,7 @@ type Table struct {
 var Default = mustBuild(rows)
 
 func mustBuild(rows []Row) *Table {
-	t, err := build(rows)
+	t, err := Build(rows)
 	if err != nil {
 		panic(err)
 	}
@@ -120,7 +129,7 @@ var (
 
 // [LAW:single-enforcer] The one checkpoint a table passes: every row parses, every id is unique, and
 // no request can match two rows, which is what lets Resolve return the first match it finds.
-func build(rows []Row) (*Table, error) {
+func Build(rows []Row) (*Table, error) {
 	var problems []error
 	endpoints := make([]Endpoint, 0, len(rows))
 	seen := map[ID]int{}
@@ -245,24 +254,45 @@ type Resolution struct {
 	Params   map[string]string
 }
 
+// MissReason is which way a request missed every endpoint.
+type MissReason string
+
+const (
+	// NoEndpoint: no endpoint has the request's host and path.
+	NoEndpoint MissReason = "no endpoint"
+	// WrongMethod: endpoints have the request's host and path, none its method.
+	WrongMethod MissReason = "wrong method"
+	// Undecodable: a path segment's escapes do not decode to UTF-8.
+	Undecodable MissReason = "undecodable escape"
+)
+
+// Miss is the error Resolve returns: why a request is addressed to no endpoint, for the 400 that
+// answers it. [LAW:one-source-of-truth] The resolver is the one that knows, so nothing re-matches to
+// explain its answer.
+type Miss struct {
+	Reason MissReason
+	why    string
+}
+
+func (m *Miss) Error() string { return m.why }
+
 // Resolve finds the endpoint a request is addressed to: its method, the host it is addressed to (any
-// case, any port, a trailing root dot; inside a tunnel that is the Host header, since a server
-// request's URL has no host there, and for a plain-origin request it is API), and its
-// escaped path. Each path segment is percent-decoded, then dot segments are removed as a WHATWG URL
-// parser removes them, before it is matched. False when no endpoint matches, including when a
-// segment's escapes do not decode to UTF-8.
-func (t *Table) Resolve(method, host, escapedPath string) (Resolution, bool) {
+// case, any port, a trailing root dot; the server passes the connection's authority, the CONNECT
+// target or API, never a header the client chose), and its escaped path. Each path segment is
+// percent-decoded, then dot segments are removed as a WHATWG URL parser removes them, before it is
+// matched. The error is a *Miss when no endpoint matches.
+func (t *Table) Resolve(method, host, escapedPath string) (Resolution, error) {
 	host = strings.TrimSuffix(strings.ToLower((&url.URL{Host: host}).Hostname()), ".")
 	rest, ok := strings.CutPrefix(escapedPath, "/")
 	if !ok {
-		return Resolution{}, false
+		return Resolution{}, &Miss{NoEndpoint, fmt.Sprintf("no endpoint: path %q does not start with /", escapedPath)}
 	}
 	raw := strings.Split(rest, "/")
 	texts := make([]string, 0, len(raw))
 	for i, r := range raw {
 		text, err := url.PathUnescape(r)
 		if err != nil || !utf8.ValidString(text) {
-			return Resolution{}, false
+			return Resolution{}, &Miss{Undecodable, fmt.Sprintf("path segment %q does not decode to UTF-8", r)}
 		}
 		if text != "." && text != ".." {
 			texts = append(texts, text)
@@ -276,15 +306,24 @@ func (t *Table) Resolve(method, host, escapedPath string) (Resolution, bool) {
 			texts = append(texts, "")
 		}
 	}
+	var methods []string
 	for _, e := range t.endpoints {
-		if e.host != host || e.method != method || len(e.segments) != len(texts) {
+		if e.host != host || len(e.segments) != len(texts) {
 			continue
 		}
-		if params, ok := e.match(texts); ok {
-			return Resolution{Endpoint: e, Params: params}, true
+		params, ok := e.match(texts)
+		switch {
+		case !ok:
+		case e.method == method:
+			return Resolution{Endpoint: e, Params: params}, nil
+		default:
+			methods = append(methods, e.method)
 		}
 	}
-	return Resolution{}, false
+	if len(methods) > 0 {
+		return Resolution{}, &Miss{WrongMethod, fmt.Sprintf("no endpoint answers %s here; this path answers %s", method, strings.Join(methods, ", "))}
+	}
+	return Resolution{}, &Miss{NoEndpoint, "no endpoint"}
 }
 
 func (e Endpoint) match(texts []string) (map[string]string, bool) {
