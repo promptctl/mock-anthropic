@@ -93,7 +93,7 @@ function assistantMessage(reply: MessageReply, request: MessagesRequest): Assist
       input_tokens: tokens(request.raw),
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
-      output_tokens: Math.max(1, content.reduce((sum, block) => sum + tokens(streamed(block).text), 0)),
+      output_tokens: Math.max(1, content.reduce((sum, block) => sum + tokens(streamedText(block)), 0)),
     },
   }
 }
@@ -106,22 +106,32 @@ function tokens(text: string): number {
 // A server-sent event of the Messages stream: its `type` is also its SSE event name.
 type StreamEvent = { readonly type: string } & Readonly<Record<string, unknown>>
 
-// What a block streams: the block as content_block_start opens it, with its streamed field empty;
-// that field's text, which output tokens are counted from; and the deltas that fill it in. A thinking
-// block's signature arrives in one signature_delta after its text, as the API sends it.
-function streamed(block: ContentBlock): { start: ContentBlock; text: string; deltas: StreamEvent[] } {
+// The text a block streams, which its output tokens are counted from.
+function streamedText(block: ContentBlock): string {
   switch (block.type) {
     case 'text':
-      return { start: { ...block, text: '' }, text: block.text, deltas: chunks(block.text).map(text => ({ type: 'text_delta', text })) }
-    case 'tool_use': {
-      const json = JSON.stringify(block.input)
-      return { start: { ...block, input: {} }, text: json, deltas: chunks(json).map(partial_json => ({ type: 'input_json_delta', partial_json })) }
-    }
+      return block.text
+    case 'tool_use':
+      return JSON.stringify(block.input)
+    case 'thinking':
+      return block.thinking
+  }
+}
+
+// What a block streams: the block as content_block_start opens it, with its streamed field empty, and
+// the deltas that fill that field in. A thinking block's signature arrives in one signature_delta
+// after its text, as the API sends it.
+function streamed(block: ContentBlock): { start: ContentBlock; deltas: StreamEvent[] } {
+  const parts = chunks(streamedText(block))
+  switch (block.type) {
+    case 'text':
+      return { start: { ...block, text: '' }, deltas: parts.map(text => ({ type: 'text_delta', text })) }
+    case 'tool_use':
+      return { start: { ...block, input: {} }, deltas: parts.map(partial_json => ({ type: 'input_json_delta', partial_json })) }
     case 'thinking':
       return {
         start: { ...block, thinking: '', signature: '' },
-        text: block.thinking,
-        deltas: [...chunks(block.thinking).map(thinking => ({ type: 'thinking_delta', thinking })), { type: 'signature_delta', signature: block.signature }],
+        deltas: [...parts.map(thinking => ({ type: 'thinking_delta', thinking })), { type: 'signature_delta', signature: block.signature }],
       }
   }
 }
@@ -157,8 +167,10 @@ function chunks(text: string): string[] {
 const EVENT_STREAM_HEADERS = { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' }
 
 // [LAW:dataflow-not-control-flow] Every stream is paced the same way: each event after the first
-// waits the script's delay, 0 included. [LAW:no-ambient-temporal-coupling] The stream owns its timer:
-// a client that leaves cancels the stream, and the cancel aborts the wait in progress.
+// awaits one wait. The wait is chosen once, from the delay: a delay of 0 is no wait at all, since even
+// a 0 ms timer costs Bun about 1.5 ms, which across a long reply's thousands of deltas is seconds the
+// script never asked for. [LAW:no-ambient-temporal-coupling] The stream owns its timer: a client that
+// leaves cancels the stream, and the cancel aborts the wait in progress.
 function eventStream(events: readonly [StreamEvent, ...StreamEvent[]], delayMs: number): Response {
   const encoder = new TextEncoder()
   const frame = (event: StreamEvent) => encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
@@ -178,10 +190,11 @@ function eventStream(events: readonly [StreamEvent, ...StreamEvent[]], delayMs: 
 }
 
 async function* paced(events: readonly [StreamEvent, ...StreamEvent[]], delayMs: number, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+  const wait = delayMs === 0 ? () => Promise.resolve() : () => sleep(delayMs, undefined, { signal })
   const [first, ...rest] = events
   yield first
   for (const event of rest) {
-    await sleep(delayMs, undefined, { signal })
+    await wait()
     yield event
   }
 }

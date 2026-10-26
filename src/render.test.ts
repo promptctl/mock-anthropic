@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
 import { renderReply } from './render.ts'
-import type { MessageReply, Reply } from './scripts.ts'
+import { type MessageReply, type Reply, readScripts } from './scripts.ts'
 
 const MODEL = 'claude-sonnet-5-5'
 
@@ -223,6 +225,20 @@ describe('ids', () => {
 })
 
 describe('a literal reply', () => {
+  test('on a status with no body (204) carries none, so no Content-Length is sent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mock-anthropic-render-'))
+    try {
+      await Bun.write(join(dir, 'empty.json'), JSON.stringify({ reply: { kind: 'literal', status: 204, body: '' } }))
+      const [script] = await readScripts([dir])
+      const reply = script!.reply(request('nothing', false))!
+      const { response } = renderReply(reply, request('nothing', false))
+      expect(response.status).toBe(204)
+      expect(response.body).toBeNull()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('is sent as written: a 429 keeps its status, headers and body, for a stream request or not', async () => {
     const body = JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Slow down' } })
     const reply: Reply = { kind: 'literal', status: 429, headers: { 'retry-after': '7', 'content-type': 'application/json', 'x-should-retry': 'true' }, body }
@@ -239,6 +255,15 @@ describe('a literal reply', () => {
 })
 
 describe('pacing', () => {
+  test('a stream with no delay takes no time per event, however many deltas a long reply has', async () => {
+    const text = 'x'.repeat(40_000)
+    const started = performance.now()
+    const stream = await events(renderReply(message([{ type: 'text', text }], 'end_turn'), request('long', true)).response)
+    expect(stream.length).toBeGreaterThan(2500)
+    // A timer per event would cost about 1.5 ms each: nearly four seconds here.
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
   test("a stream waits the script's delay before each event after the first, and reports it", async () => {
     const delay = 40
     const started = performance.now()
