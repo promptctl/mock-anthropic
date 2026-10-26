@@ -37,6 +37,8 @@ export function serviceGenerators() {
     'event-logging-batch': json({}),
     'event-logging-v2-batch': json({}),
     'datadog-logs': json({}),
+    // 2.1.289's error tracking reads only the status, and logs one other than 2xx as a warning.
+    'datadog-error-tracking': json({}),
     // Off: on, 2.1.289's BigQuery exporter posts to the refused `otel-metrics` row.
     'metrics-enabled': json({ metrics_logging_enabled: false }),
     // No settings: both builds read a 204 as none configured.

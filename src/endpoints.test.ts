@@ -100,6 +100,7 @@ describe('resolveEndpoint over the endpoint table', () => {
     ['organization-marketplaces', API, 'GET', `/api/oauth/organizations/${ORG}/marketplaces`],
     ['organization-plugins', API, 'GET', `/api/oauth/organizations/${ORG}/plugins/list-plugins`],
     ['datadog-logs', 'http-intake.logs.us5.datadoghq.com', 'POST', '/api/v2/logs'],
+    ['datadog-error-tracking', 'browser-intake-us5-datadoghq.com', 'POST', '/api/v2/logs'],
   ]
   for (const [id, host, method, path] of inScope) {
     test(`${method} ${host}${path} resolves to in-scope ${id}`, () => {
@@ -164,7 +165,7 @@ test('every endpoint PROJECT.md says 2.1.289 also calls is an in-scope row', asy
   const section = doc.split('\nClaude Code 2.1.289 also calls')[1]?.split('\n### ')[0] ?? ''
   const listed = [...section.matchAll(/^- `([A-Z]+) ([^`]+)`/gm)].map(([, method, path]) => `${method} ${path}`)
   const inScope = ENDPOINT_TABLE.endpoints.filter(e => e.scope === 'in-scope').map(e => `${e.method} ${e.path}`)
-  expect(listed).toHaveLength(5)
+  expect(listed).toHaveLength(6)
   for (const endpoint of listed) expect(inScope).toContain(endpoint)
 })
 
