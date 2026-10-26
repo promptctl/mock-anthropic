@@ -14,17 +14,14 @@ const TextBlock = z.object({ type: z.literal(TEXT), text: z.string() }).transfor
 const OtherBlock = z
   .object({ type: z.string().refine(type => !READ_TYPES.has(type), 'is a block type read here, so must have its fields') })
   .transform((): string[] => [])
-const ToolResultContent = z.union([
-  z.string().transform(text => [text]),
-  z.array(z.union([TextBlock, OtherBlock])).transform(texts => texts.flat()),
-])
+// [LAW:one-type-per-behavior] A message's content and a tool result's content are one shape, a
+// string or a list of blocks, and differ only in the blocks they admit.
+const contentOf = (block: z.ZodType<string[]>) =>
+  z.union([z.string().transform(text => [text]), z.array(block).transform(texts => texts.flat())])
 const ToolResultBlock = z
-  .object({ type: z.literal(TOOL_RESULT), content: ToolResultContent.optional() })
+  .object({ type: z.literal(TOOL_RESULT), content: contentOf(z.union([TextBlock, OtherBlock])).optional() })
   .transform(block => block.content ?? [])
-const Content = z.union([
-  z.string().transform(text => [text]),
-  z.array(z.union([TextBlock, ToolResultBlock, OtherBlock])).transform(texts => texts.flat()),
-])
+const Content = contentOf(z.union([TextBlock, ToolResultBlock, OtherBlock]))
 const Message = z.object({ role: z.enum(['user', 'assistant']), content: Content })
 
 // Claude Code sends many fields no part of the mock reads, and zod drops keys a schema does not name,

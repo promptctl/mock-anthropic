@@ -226,6 +226,19 @@ describe('a script that cannot be read fails loudly with its path', () => {
     await expect(readScripts([dir])).rejects.toThrow(`script ${join(dir, 'sub.json')}: cannot read: Error: not a regular file`)
   })
 
+  test('a file that is not UTF-8', async () => {
+    const dir = await directory()
+    const path = join(dir, 'latin1.json')
+    await Bun.write(path, new Uint8Array([...new TextEncoder().encode('{"reply": "caf'), 0xe9, ...new TextEncoder().encode('"}')]))
+    await expect(readScripts([dir])).rejects.toThrow(`script ${path}: cannot read: `)
+  })
+
+  test('of several bad scripts, the one named is the first in order', async () => {
+    // The first is large, so a read that let the files race would settle the second first.
+    const dir = await directory({ 'a.json': `{"reply": ${'['.repeat(1_000_000)}`, 'b.json': '{' })
+    for (let run = 0; run < 3; run++) await expect(readScripts([dir])).rejects.toThrow(`script ${join(dir, 'a.json')}: not JSON`)
+  })
+
   test('a named pipe, which would wait forever for a writer', async () => {
     const dir = await directory()
     const fifo = join(dir, 'pipe.json')

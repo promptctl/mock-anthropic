@@ -107,18 +107,21 @@ const SCRIPT_SUFFIX = '.json'
 // `x.json.tmp` and renames it never has a half-written script read.
 // [LAW:no-silent-failure] An unreadable directory or file, or a file that is not a script, throws
 // with its path; the generator's caller turns that into a 500 and a FAILED line.
+// Read one file at a time, in the order they are tried: at most one is open, however many a
+// directory holds, and when several are bad the one named is always the first in that order.
 export async function readScripts(dirs: readonly string[]): Promise<Script[]> {
-  const perDir = await Promise.all(dirs.map(readDirectory))
-  return perDir.flat()
+  const scripts: Script[] = []
+  for (const dir of dirs) {
+    for (const path of await scriptPaths(dir)) scripts.push(...(await readScript(path)))
+  }
+  return scripts
 }
 
-async function readDirectory(dir: string): Promise<Script[]> {
+async function scriptPaths(dir: string): Promise<string[]> {
   const names = await readdir(dir).catch((error: unknown) => {
     throw new Error(`scripts directory ${dir}: cannot read: ${String(error)}`, { cause: error })
   })
-  const paths = names.filter(name => name.endsWith(SCRIPT_SUFFIX) && !name.startsWith('.')).sort().map(name => join(dir, name))
-  const scripts = await Promise.all(paths.map(readScript))
-  return scripts.flat()
+  return names.filter(name => name.endsWith(SCRIPT_SUFFIX) && !name.startsWith('.')).sort().map(name => join(dir, name))
 }
 
 async function readScript(path: string): Promise<Script[]> {
@@ -145,6 +148,9 @@ async function readScript(path: string): Promise<Script[]> {
   ]
 }
 
+// Fatal, so a file that is not UTF-8 is a bad script instead of one whose needles silently never match.
+const UTF8 = new TextDecoder('utf-8', { fatal: true })
+
 // A script removed after its directory was listed is not in the directory any more, so it reads as
 // none (null); a name that is still there and cannot be read, such as a dangling symlink, throws.
 // [LAW:no-silent-failure] Opened without blocking and checked on the open handle, so a name that is
@@ -161,7 +167,7 @@ async function readRegularFile(path: string): Promise<string | null> {
   }
   try {
     if (!(await handle.stat()).isFile()) throw new Error('not a regular file')
-    return await handle.readFile('utf8')
+    return UTF8.decode(await handle.readFile())
   } catch (error) {
     throw cannotRead(error)
   } finally {
