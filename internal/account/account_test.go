@@ -1,0 +1,167 @@
+package account
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func otherAccount() map[string]any {
+	return map[string]any{
+		"accountUuid":      SyntheticUUID(3),
+		"emailAddress":     "other@mock-anthropic.invalid",
+		"organizationUuid": SyntheticUUID(4),
+		"organizationName": "Other Organization",
+		"subscriptionType": "pro",
+	}
+}
+
+func writeFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "account.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeJSON(t *testing.T, value map[string]any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writeFile(t, string(data))
+}
+
+func TestSyntheticUUIDsAreRecognized(t *testing.T) {
+	for _, n := range []uint64{0, 1, 0xabc, 1<<48 - 1} {
+		uuid := SyntheticUUID(n)
+		if !uuidForm.MatchString(uuid) || !IsSyntheticUUID(uuid) {
+			t.Errorf("SyntheticUUID(%d) = %q is not a recognized synthetic UUID", n, uuid)
+		}
+	}
+	if got := SyntheticUUID(1); got != "00000000-0000-4000-8000-000000000001" {
+		t.Errorf("SyntheticUUID(1) = %q", got)
+	}
+}
+
+func TestSyntheticUUIDPanicsOutsideTheForm(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("SyntheticUUID(16^12) did not panic")
+		}
+	}()
+	SyntheticUUID(1 << 48)
+}
+
+func TestSyntheticFormRejectsOtherUUIDs(t *testing.T) {
+	for _, s := range []string{
+		"1" + SyntheticUUID(1)[1:], // a UUID outside the synthetic prefix
+		strings.ToUpper(SyntheticUUID(0xabc)),
+		"00000000-0000-4000-8000-00000000001",
+		" " + SyntheticUUID(1),
+	} {
+		if IsSyntheticUUID(s) {
+			t.Errorf("IsSyntheticUUID(%q) = true", s)
+		}
+	}
+}
+
+func TestDefaultParsesAndIsSynthetic(t *testing.T) {
+	data, err := json.Marshal(Default)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Parse(data, "a copy of the default")
+	if err != nil || again != Default {
+		t.Fatalf("the default does not round-trip: %v, %v", again, err)
+	}
+	if !IsSyntheticUUID(Default.AccountUUID()) || !IsSyntheticUUID(Default.OrganizationUUID()) {
+		t.Errorf("default UUIDs are not synthetic: %s", data)
+	}
+	if !strings.HasSuffix(Default.EmailAddress(), ".invalid") {
+		t.Errorf("default email %q is not under .invalid", Default.EmailAddress())
+	}
+}
+
+func TestFileReplacesTheDefaultWithExactlyItsAccount(t *testing.T) {
+	want := otherAccount()
+	got, err := ReadFile(writeJSON(t, want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(got)
+	var back map[string]any
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range want {
+		if back[k] != v {
+			t.Errorf("%s = %v, want %v", k, back[k], v)
+		}
+	}
+	if len(back) != len(want) {
+		t.Errorf("account has keys %v, want exactly %v", back, want)
+	}
+}
+
+func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
+	with := func(key string, value any) map[string]any {
+		a := otherAccount()
+		if value == nil {
+			delete(a, key)
+		} else {
+			a[key] = value
+		}
+		return a
+	}
+	dir := t.TempDir()
+	cases := []struct {
+		name  string
+		path  string
+		names []string // every one must appear in the error, after "account from <path>: "
+	}{
+		{"bad uuid", writeJSON(t, with("organizationUuid", "nope")), []string{"organizationUuid"}},
+		{"missing field", writeJSON(t, with("emailAddress", nil)), []string{"emailAddress", "missing"}},
+		{"unknown key", writeJSON(t, with("acountUuid", SyntheticUUID(5))), []string{"acountUuid"}},
+		{"blank organization name", writeJSON(t, with("organizationName", " ")), []string{"organizationName"}},
+		{"email with display name", writeJSON(t, with("emailAddress", "A <a@b.invalid>")), []string{"emailAddress"}},
+		{"unknown subscription", writeJSON(t, with("subscriptionType", "free")), []string{"subscriptionType"}},
+		{"wrong JSON type", writeJSON(t, with("organizationName", 7)), []string{"not a JSON account", "organizationName"}},
+		{"not JSON", writeFile(t, "{ not json"), []string{"not a JSON account"}},
+		{"data after the object", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object"}},
+		{"absent file", filepath.Join(dir, "absent.json"), []string{"cannot read"}},
+		{"a directory", dir, []string{"cannot read"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ReadFile(c.path)
+			var inputErr *InputError
+			if !errors.As(err, &inputErr) {
+				t.Fatalf("got %v, want an *InputError", err)
+			}
+			prefix := "account from " + c.path + ": "
+			if !strings.HasPrefix(err.Error(), prefix) {
+				t.Errorf("%q does not open with %q", err, prefix)
+			}
+			for _, name := range c.names {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("%q does not name %q", err, name)
+				}
+			}
+		})
+	}
+}
+
+func TestEveryBadFieldIsNamedAtOnce(t *testing.T) {
+	a := otherAccount()
+	a["accountUuid"], a["subscriptionType"] = "x", "free"
+	_, err := ReadFile(writeJSON(t, a))
+	if err == nil || !strings.Contains(err.Error(), "accountUuid") || !strings.Contains(err.Error(), "subscriptionType") {
+		t.Errorf("got %v, want both accountUuid and subscriptionType named", err)
+	}
+}
