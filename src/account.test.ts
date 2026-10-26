@@ -7,7 +7,7 @@ import {
   type Account,
   AccountSchema,
   DEFAULT_ACCOUNT,
-  InvalidAccountError,
+  AccountInputError,
   isSyntheticUuid,
   readAccountFile,
   syntheticUuid,
@@ -61,6 +61,13 @@ describe('the default account', () => {
     expect(isSyntheticUuid(DEFAULT_ACCOUNT.organizationUuid)).toBe(true)
     expect(DEFAULT_ACCOUNT.emailAddress).toEndWith('.invalid')
   })
+
+  test('cannot be changed by a consumer', () => {
+    expect(() => {
+      ;(DEFAULT_ACCOUNT as { organizationName: string }).organizationName = 'Changed'
+    }).toThrow(TypeError)
+    expect(DEFAULT_ACCOUNT.organizationName).toBe('Mock Organization')
+  })
 })
 
 describe('an account file', () => {
@@ -72,9 +79,10 @@ describe('an account file', () => {
   test('with a bad field is rejected naming the file and the field', async () => {
     const path = await writeAccountFile('bad-uuid.json', JSON.stringify({ ...OTHER_ACCOUNT, organizationUuid: 'nope' }))
     const error = readAccountFile(path)
-    await expect(error).rejects.toBeInstanceOf(InvalidAccountError)
+    await expect(error).rejects.toBeInstanceOf(AccountInputError)
     await expect(error).rejects.toThrow(path)
     await expect(error).rejects.toThrow('organizationUuid')
+    await expect(error).rejects.toThrow(`account from ${path}: ✖`)
   })
 
   test('with a missing field is rejected naming the field', async () => {
@@ -90,14 +98,14 @@ describe('an account file', () => {
 
   test('that is not JSON is rejected naming the file', async () => {
     const path = await writeAccountFile('broken.json', '{ not json')
-    await expect(readAccountFile(path)).rejects.toThrow(`invalid account in ${path}: not JSON`)
+    await expect(readAccountFile(path)).rejects.toThrow(`account from ${path}: not JSON: SyntaxError`)
   })
 
   test('that cannot be read is rejected naming the file', async () => {
     for (const path of [join(dir, 'absent.json'), dir]) {
       const error = readAccountFile(path)
-      await expect(error).rejects.toBeInstanceOf(InvalidAccountError)
-      await expect(error).rejects.toThrow(`invalid account in ${path}: cannot read`)
+      await expect(error).rejects.toBeInstanceOf(AccountInputError)
+      await expect(error).rejects.toThrow(`account from ${path}: cannot read: Error`)
     }
   })
 

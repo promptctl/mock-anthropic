@@ -3,10 +3,10 @@ import { z } from 'zod'
 // PROJECT.md "Inputs / The account": the identity the mock logs Claude Code in as. Every response
 // that carries identity is derived from one value of this type.
 
-// [LAW:one-source-of-truth] The one declaration of what a synthetic UUID looks like. The default
-// account, every test that needs another account, and the repo-safety scan all build or recognize
-// UUIDs through this prefix, so the scan's allowlist is this form and not a hand-kept list. The prefix
-// fixes 74 of a random v4 UUID's 122 random bits, so a real UUID matches it with probability 2^-74.
+// [LAW:one-source-of-truth] The one declaration of what a synthetic UUID looks like. Synthetic UUIDs
+// are built by syntheticUuid and recognized by isSyntheticUuid, so telling one from a real UUID needs
+// this form, not a hand-kept list. The prefix fixes 74 of a random v4 UUID's 122 random bits, so a
+// real UUID matches it with probability 2^-74.
 const SYNTHETIC_UUID_PREFIX = '00000000-0000-4000-8000-'
 const SYNTHETIC_UUID_DIGITS = 12
 const SYNTHETIC_UUID = new RegExp(`^${SYNTHETIC_UUID_PREFIX}[0-9a-f]{${SYNTHETIC_UUID_DIGITS}}$`)
@@ -33,13 +33,16 @@ export const AccountSchema = z.strictObject({
   subscriptionType: z.enum(['pro', 'max', 'team', 'enterprise']),
 })
 
-export type Account = z.infer<typeof AccountSchema>
+// Readonly, and frozen by parseAccount: every identity response is built from one shared value, so
+// no consumer may change it.
+export type Account = Readonly<z.infer<typeof AccountSchema>>
 
-// Every way an account input can be wrong, so a command maps a bad `--account FILE` to exit 2 by type.
-export class InvalidAccountError extends Error {
+// Every way an account input can fail (unreadable, not JSON, schema), so a command maps a bad
+// `--account FILE` to exit 2 by type.
+export class AccountInputError extends Error {
   constructor(origin: string, reason: string, options?: ErrorOptions) {
-    super(`invalid account in ${origin}: ${reason}`, options)
-    this.name = 'InvalidAccountError'
+    super(`account from ${origin}: ${reason}`, options)
+    this.name = 'AccountInputError'
   }
 }
 
@@ -48,9 +51,9 @@ export class InvalidAccountError extends Error {
 export function parseAccount(value: unknown, origin: string): Account {
   const result = AccountSchema.safeParse(value)
   if (!result.success) {
-    throw new InvalidAccountError(origin, `\n${z.prettifyError(result.error)}`)
+    throw new AccountInputError(origin, z.prettifyError(result.error))
   }
-  return result.data
+  return Object.freeze(result.data)
 }
 
 export const DEFAULT_ACCOUNT: Account = parseAccount(
@@ -65,16 +68,16 @@ export const DEFAULT_ACCOUNT: Account = parseAccount(
 )
 
 // [LAW:effects-at-boundaries] The consumer override: a JSON file holding a complete account, which
-// replaces the default whole. serve, login, and run all resolve `--account FILE` through this.
+// replaces the default whole.
 export async function readAccountFile(path: string): Promise<Account> {
-  const text = await Bun.file(path).text().catch((error: Error) => {
-    throw new InvalidAccountError(path, `cannot read: ${error.message}`, { cause: error })
+  const text = await Bun.file(path).text().catch((error: unknown) => {
+    throw new AccountInputError(path, `cannot read: ${String(error)}`, { cause: error })
   })
   let value: unknown
   try {
     value = JSON.parse(text)
   } catch (error) {
-    throw new InvalidAccountError(path, `not JSON: ${(error as Error).message}`, { cause: error })
+    throw new AccountInputError(path, `not JSON: ${String(error)}`, { cause: error })
   }
   return parseAccount(value, path)
 }
