@@ -41,7 +41,7 @@ The identity the mock logs Claude Code in as: account UUID, email, organization 
 
 A consumer supplies a directory of script files. Each file says which Messages requests it answers and what reply to generate.
 
-- **Matching**: substrings that must appear anywhere in the raw request body, and substrings that must appear in the request's last `user` message. No conditions means every Messages request.
+- **Matching**: substrings that must appear anywhere in the raw request body, and substrings that must appear in the request's last `user` message. A `system`-role message in `messages` is not a `user` message, so its text is matched only through the raw body. No conditions means every Messages request.
 - **Reply**: a list of content blocks (`text`, `tool_use` with a name and input, `thinking`) and a stop reason (`end_turn`, `tool_use`, `max_tokens`), optionally with a delay between streamed events. Alternatively, a literal status, headers, and body for testing error handling (a 429, a 500, an overloaded error).
 - **Order**: scripts are tried in a defined order (file name order within a directory, consumer directories ahead of the mock's built-in ones). The first match answers.
 - **Reloading**: script directories are read as each request is answered, so a test can write a script after the mock has started. A script is a file whose name ends `.json` and does not start with `.`, so a test that writes it under another name and renames it into place never has it read half-written.

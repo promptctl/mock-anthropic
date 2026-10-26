@@ -37,6 +37,19 @@ describe('the Messages generator', () => {
     expect(text).toContain(`"id":"${(facts.reply as { id: string }).id}"`)
   })
 
+  test('answers a request carrying a system-role message, as 2.1.289 sends hook context, with the scripted reply', async () => {
+    const dir = await directory({ 'hello.json': SAYS_HELLO })
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'system', content: [{ type: 'text', text: 'SessionStart hook additional context: be brief' }] },
+    ]
+    const { verdict, response, facts } = await send([dir], 'hello', { raw: JSON.stringify({ model: MODEL, max_tokens: 1024, messages }) })
+    expect(verdict).toEqual({ outcome: 'served' })
+    const message = (await response.json()) as { id: string; content: unknown }
+    expect(message.content).toEqual([{ type: 'text', text: 'Hello!' }])
+    expect(facts).toEqual({ script: join(dir, 'hello.json'), reply: { kind: 'json', id: message.id, stop_reason: 'end_turn' } })
+  })
+
   test('returns a scripted 429 verbatim', async () => {
     const dir = await directory({ 'limit.json': RATE_LIMITED })
     const { verdict, response, facts } = await send([dir], 'anything', { stream: true })

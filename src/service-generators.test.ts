@@ -97,6 +97,12 @@ describe('token counting', () => {
     expect(await count(request('hello '.repeat(100)))).toBeGreaterThan(short)
   })
 
+  test('a conversation carrying a system-role message counts, as a Messages request admits one', async () => {
+    const withHookContext = { role: 'system', content: [{ type: 'text', text: 'SessionStart hook additional context: be brief' }] }
+    const body = JSON.stringify({ model: 'claude-sonnet-5-5', messages: [{ role: 'user', content: 'hello' }, withHookContext] })
+    expect(await count(body)).toBeGreaterThan(await count(request('hello')))
+  })
+
   // [LAW:one-source-of-truth] A conversation counts the same as a token count request and as a Messages
   // request, which also carries the fields that shape only the reply.
   test('a conversation counts what a Messages reply to it reports as its input', async () => {

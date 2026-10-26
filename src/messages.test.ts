@@ -72,13 +72,28 @@ describe('parseMessagesRequest', () => {
     expect(request.lastUserTexts).toEqual(['string result', 'block result', 'typed text'])
   })
 
+  test('a system-role message is read as part of the conversation, neither the current turn nor the system prompt', () => {
+    // The shape 2.1.289 sends when a SessionStart hook adds context.
+    const request = parsed({
+      ...REQUIRED,
+      system: [{ type: 'text', text: 'You are Claude Code.' }],
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Say hello and nothing else.' }] },
+        { role: 'system', content: [{ type: 'text', text: 'SessionStart hook additional context: be brief' }] },
+      ],
+    })
+    expect(request.lastUserTexts).toEqual(['Say hello and nothing else.'])
+    expect(request.systemTexts).toEqual(['You are Claude Code.'])
+  })
+
   test('a body that is not a Messages request is invalid, with the reason', () => {
     expect(invalid('{not json')).toStartWith('body is not JSON: ')
     expect(invalid('[]')).toStartWith('body is not a Messages request: ')
     expect(invalid(JSON.stringify({ ...REQUIRED }))).toContain('messages')
     expect(invalid(JSON.stringify({ ...REQUIRED, messages: [] }))).toContain('messages')
     expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'assistant', content: 'only me' }] }))).toContain('has no user message')
-    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'system', content: 'x' }] }))).toContain('role')
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'system', content: 'x' }] }))).toContain('has no user message')
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'tool', content: 'x' }] }))).toContain('role')
     expect(invalid(JSON.stringify({ max_tokens: 1024, messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
     expect(invalid(JSON.stringify({ ...REQUIRED, model: '', messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
     expect(invalid(JSON.stringify({ ...REQUIRED, stream: 'yes', messages: [{ role: 'user', content: 'x' }] }))).toContain('stream')
@@ -110,5 +125,7 @@ describe('parseMessagesRequest', () => {
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
+    const malformedSystem = [{ role: 'user', content: 'hi' }, { role: 'system', content: [{ type: 'text', text: 5 }] }]
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: malformedSystem }))).toContain('messages[1].content')
   })
 })
