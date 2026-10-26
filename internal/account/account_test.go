@@ -159,9 +159,14 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 		{"control character", writeJSON(t, with("organizationName", "Org\x00")), []string{"organizationName", "control character"}},
 		{"invalid UTF-8", writeFile(t, "{\"organizationName\":\"Org\xff\"}"), []string{"organizationName", "UTF-8"}},
 		{"trailing data keeps field problems", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object", "accountUuid: not", "emailAddress: missing"}},
+		{"lone surrogate escape", writeFile(t, `{"organizationName":"Org\ud800"}`), []string{"organizationName", "UTF-8"}},
+		{"ip address email", writeJSON(t, with("emailAddress", "a@1.2.3.4")), []string{"emailAddress"}},
+		{"overlong label email", writeJSON(t, with("emailAddress", "a@"+strings.Repeat("b", 64)+".invalid")), []string{"emailAddress"}},
+		{"truncated keeps field problems", writeFile(t, `{"accountUuid":"x"`), []string{"accountUuid: not", "ends before the object closes"}},
+		{"empty", writeFile(t, ""), []string{"empty"}},
+		{"bounded raw echo", writeFile(t, `{"organizationName":`+strings.Repeat("7", 500)+`}`), []string{"organizationName: not a string, got \""+strings.Repeat("7", 40)+"\"..."}},
 		{"not an object", writeFile(t, "null"), []string{"not a JSON object"}},
 		{"not JSON", writeFile(t, "{ not json"), []string{"not JSON"}},
-		{"data after the object", writeFile(t, `{"accountUuid":"x"} {}`), []string{"data after the object"}},
 		{"absent file", filepath.Join(dir, "absent.json"), []string{"cannot read"}},
 		{"a directory", dir, []string{"cannot read"}},
 	}
@@ -190,7 +195,7 @@ func TestEveryBadKeyIsNamedAtOnce(t *testing.T) {
 	delete(a, "emailAddress")
 	a["accountUuid"], a["subscriptionType"], a["acountUuid"], a["organizationName"] = "x", "free", "x", 7
 	got, err := ReadFile(writeJSON(t, a))
-	if got != (Account{}) {
+	if got.f != nil {
 		t.Errorf("a rejected file returned account %v, want the zero Account", got)
 	}
 	for _, name := range []string{"accountUuid", "subscriptionType", `"acountUuid"`, "organizationName", "emailAddress: missing"} {

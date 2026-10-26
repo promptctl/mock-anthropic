@@ -56,7 +56,11 @@ type fields struct {
 
 // [LAW:parse-dont-validate] An Account exists only as Parse's output. It shares one frozen fields value
 // across copies; the zero Account holds none, so using one panics instead of reading as an empty identity.
-type Account struct{ f *fields }
+// Not comparable: == would compare which Parse made it, not the account.
+type Account struct {
+	f *fields
+	_ [0]func()
+}
 
 func (a Account) AccountUUID() string                { return a.f.accountUUID }
 func (a Account) EmailAddress() string               { return a.f.emailAddress }
@@ -71,7 +75,7 @@ type schemaField struct {
 }
 
 // [LAW:one-source-of-truth] [LAW:domain-language] The five facts PROJECT.md names, under the names
-// Claude Code gives them in its `oauthAccount` config block, so `login` and the generators copy them
+// Claude Code gives them in its `oauthAccount` config block and its credential, so `login` and the generators copy them
 // across unrenamed. Parse reads and MarshalJSON writes exactly these keys, in this order.
 var schema = []schemaField{
 	{"accountUuid", func(f *fields) *string { return &f.accountUUID }, checkUUID},
@@ -111,8 +115,8 @@ func (a Account) MarshalJSON() ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// InputError is every way an account input can fail (unreadable, not JSON, schema), so a command maps
-// a bad `--account FILE` to exit 2 by type.
+// InputError is every way an account input can fail (unreadable, not JSON, schema). A bad
+// `--account FILE` is a wrong command line: the command reading it answers with a command.UsageError.
 type InputError struct {
 	Origin string
 	Reason string
@@ -131,13 +135,17 @@ func checkUUID(s string) string {
 	return ""
 }
 
-var hostname = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
+// A DNS name of two or more labels, each at most 63 characters, the last holding a letter, so an IP
+// address is not taken for one.
+var hostname = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 
-// checkText refuses what json.Unmarshal would hide: invalid UTF-8 (silently replaced with U+FFFD) and
-// control characters, so the account written back is the one the file holds.
-func checkText(raw json.RawMessage, s string) string {
-	if !utf8.Valid(raw) {
-		return "not valid UTF-8"
+const maxHostname = 253
+
+// checkText refuses what json.Unmarshal would hide: invalid UTF-8 and lone surrogate escapes both
+// decode silently to U+FFFD, so the account written back would not be the one the file holds.
+func checkText(s string) string {
+	if strings.ContainsRune(s, utf8.RuneError) {
+		return "not valid UTF-8 (holds U+FFFD)"
 	}
 	if strings.ContainsFunc(s, unicode.IsControl) {
 		return "contains a control character"
@@ -150,7 +158,8 @@ func checkEmail(s string) string {
 	if err != nil || address.Address != s {
 		return "not a bare email address"
 	}
-	if !hostname.MatchString(s[strings.LastIndexByte(s, '@')+1:]) {
+	if domain := s[strings.LastIndexByte(s, '@')+1:]; len(domain) > maxHostname || !hostname.MatchString(domain) ||
+		!strings.ContainsFunc(domain[strings.LastIndexByte(domain, '.')+1:], unicode.IsLetter) {
 		return "domain is not a dotted host name"
 	}
 	return ""
@@ -160,8 +169,21 @@ func checkEmail(s string) string {
 // from, so the error names both the source and every bad key. Keys match exactly: encoding/json's
 // case-insensitive, last-duplicate-wins struct decoding would accept keys `login` reads differently.
 func Parse(data []byte, origin string) (Account, error) {
+	var problems []string
+	failed := func() (Account, error) {
+		return Account{}, &InputError{origin, strings.Join(problems, "; ")}
+	}
+	// A syntax error ends the walk; the problems found before it are still reported.
 	notJSON := func(err error) (Account, error) {
-		return Account{}, &InputError{origin, "not JSON: " + err.Error()}
+		switch {
+		case len(bytes.TrimSpace(data)) == 0:
+			problems = append(problems, "empty")
+		case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+			problems = append(problems, "not JSON: ends before the object closes")
+		default:
+			problems = append(problems, "not JSON: "+err.Error())
+		}
+		return failed()
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	open, err := decoder.Token()
@@ -169,11 +191,11 @@ func Parse(data []byte, origin string) (Account, error) {
 		return notJSON(err)
 	}
 	if open != json.Delim('{') {
-		return Account{}, &InputError{origin, fmt.Sprintf("not a JSON object, got %v", open)}
+		problems = append(problems, "not a JSON object, got "+quoteJSON(data))
+		return failed()
 	}
 
 	var f fields
-	var problems []string
 	seen := map[string]bool{}
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -197,10 +219,10 @@ func Parse(data []byte, origin string) (Account, error) {
 		seen[key] = true
 		var s string
 		if string(value) == "null" || json.Unmarshal(value, &s) != nil {
-			problems = append(problems, fmt.Sprintf("%s: not a string, got %s", key, value))
+			problems = append(problems, fmt.Sprintf("%s: not a string, got %s", key, quoteJSON(value)))
 			continue
 		}
-		why := checkText(value, s)
+		why := checkText(s)
 		if why == "" {
 			why = schema[i].check(s)
 		}
@@ -221,9 +243,18 @@ func Parse(data []byte, origin string) (Account, error) {
 		}
 	}
 	if len(problems) > 0 {
-		return Account{}, &InputError{origin, strings.Join(problems, "; ")}
+		return failed()
 	}
-	return Account{&f}, nil
+	return Account{f: &f}, nil
+}
+
+// quoteJSON quotes a JSON value for an error, cut to a length a terminal line holds.
+func quoteJSON(value []byte) string {
+	const limit = 40
+	if text := bytes.TrimSpace(value); len(text) > limit {
+		return fmt.Sprintf("%q...", text[:limit])
+	}
+	return fmt.Sprintf("%q", bytes.TrimSpace(value))
 }
 
 // [LAW:effects-at-boundaries] ReadFile is the consumer override: a JSON file holding a complete
