@@ -2,3 +2,5 @@ node_modules/
 # Claude Code's agent worktrees are nested repositories, not content of this one.
 .claude/worktrees/
 .DS_Store
+# The CA and leaf certificates `serve` generates on first start (src/certificates.ts).
+/certs/
