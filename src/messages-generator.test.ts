@@ -43,9 +43,11 @@ describe('the Messages generator', () => {
       { role: 'user', content: [{ type: 'text', text: 'hello' }] },
       { role: 'system', content: [{ type: 'text', text: 'SessionStart hook additional context: be brief' }] },
     ]
-    const { verdict, response } = await send([dir], 'hello', { raw: JSON.stringify({ model: MODEL, max_tokens: 1024, messages }) })
+    const { verdict, response, facts } = await send([dir], 'hello', { raw: JSON.stringify({ model: MODEL, max_tokens: 1024, messages }) })
     expect(verdict).toEqual({ outcome: 'served' })
-    expect(((await response.json()) as { content: unknown }).content).toEqual([{ type: 'text', text: 'Hello!' }])
+    const message = (await response.json()) as { id: string; content: unknown }
+    expect(message.content).toEqual([{ type: 'text', text: 'Hello!' }])
+    expect(facts).toEqual({ script: join(dir, 'hello.json'), reply: { kind: 'json', id: message.id, stop_reason: 'end_turn' } })
   })
 
   test('returns a scripted 429 verbatim', async () => {

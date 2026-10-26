@@ -99,7 +99,7 @@ describe('token counting', () => {
 
   test('a conversation carrying a system-role message counts, as a Messages request admits one', async () => {
     const withHookContext = { role: 'system', content: [{ type: 'text', text: 'SessionStart hook additional context: be brief' }] }
-    const body = JSON.stringify({ ...JSON.parse(request('hello')), messages: [{ role: 'user', content: 'hello' }, withHookContext] })
+    const body = JSON.stringify({ model: 'claude-sonnet-5-5', messages: [{ role: 'user', content: 'hello' }, withHookContext] })
     expect(await count(body)).toBeGreaterThan(await count(request('hello')))
   })
 

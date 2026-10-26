@@ -84,7 +84,6 @@ describe('parseMessagesRequest', () => {
     })
     expect(request.lastUserTexts).toEqual(['Say hello and nothing else.'])
     expect(request.systemTexts).toEqual(['You are Claude Code.'])
-    invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: 'hi' }, { role: 'system', content: [{ type: 'text', text: 5 }] }] }))
   })
 
   test('a body that is not a Messages request is invalid, with the reason', () => {
@@ -126,5 +125,7 @@ describe('parseMessagesRequest', () => {
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
     invalid(JSON.stringify({ ...REQUIRED, messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
+    const malformedSystem = [{ role: 'user', content: 'hi' }, { role: 'system', content: [{ type: 'text', text: 5 }] }]
+    expect(invalid(JSON.stringify({ ...REQUIRED, messages: malformedSystem }))).toContain('messages[1].content')
   })
 })
