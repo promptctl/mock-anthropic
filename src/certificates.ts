@@ -1,6 +1,6 @@
 import { createHash, randomBytes, X509Certificate } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // PROJECT.md "How a program reaches it": the CA a consumer trusts through NODE_EXTRA_CA_CERTS, and
@@ -10,8 +10,9 @@ import { fileURLToPath } from 'node:url'
 // Where `serve` keeps them: in the checkout, and gitignored.
 export const CERTS_DIR = fileURLToPath(new URL('../certs', import.meta.url))
 
-// [LAW:nothing-unseen] Whether a start made a certificate or found one, for the start's own record.
-export type Outcome = 'generated' | 'reused'
+// [LAW:nothing-unseen] Whether a start made a certificate, found one, or made one and then found that a
+// start running at the same moment had published first, for the start's own record.
+export type Outcome = 'generated' | 'reused' | 'lost-race'
 
 export type Issued = { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
 
@@ -95,7 +96,8 @@ export type Published = { readonly path: string; readonly outcome: Outcome }
 // recipe names a directory not yet built and nothing on disk is ever checked for staleness. It is
 // built in a scratch directory, then renamed into place whole, so a published name is always
 // complete; when two starts build one name at once, the rename decides between them: renaming onto a
-// published, non-empty directory fails and leaves it untouched, and the loser uses the winner's.
+// published, non-empty directory fails and leaves it untouched, and the loser discards its own and
+// uses the winner's.
 export async function publish(
   dir: string,
   kind: string,
@@ -110,7 +112,7 @@ export async function publish(
     return await rename(scratch, path).then(
       () => ({ path, outcome: 'generated' as const }),
       (error: NodeJS.ErrnoException) => {
-        if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return { path, outcome: 'reused' as const }
+        if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return { path, outcome: 'lost-race' as const }
         throw error
       },
     )
@@ -137,13 +139,11 @@ async function issue(dir: string, kind: string, basis: readonly string[], recipe
 }
 
 // [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's basis is
-// the CA's fingerprint, so a replaced CA gets a new leaf too. The leaf is built in a sibling of the
-// CA's directory and names the CA relative to it, so its recipe holds no absolute path.
+// the CA's fingerprint, so a replaced CA gets a new leaf too.
 export async function ensureCertificates(dir: string, hosts: readonly string[]): Promise<Certificates> {
   await mkdir(dir, { recursive: true })
   const ca = await issue(dir, 'ca', [], CA)
   const fingerprint = new X509Certificate(await Bun.file(ca.certPath).text()).fingerprint256
-  const signer = files(join('..', basename(dirname(ca.certPath))))
-  const leaf = await issue(dir, 'leaf', [fingerprint], leafRecipe(hosts, signer))
+  const leaf = await issue(dir, 'leaf', [fingerprint], leafRecipe(hosts, ca))
   return { ca, leaf }
 }

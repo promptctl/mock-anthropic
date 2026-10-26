@@ -111,16 +111,17 @@ test('two starts at once in an empty dir agree on one CA and one leaf', async ()
   const [a, b] = await Promise.all([ensureCertificates(dir, ENDPOINT_HOSTS), ensureCertificates(dir, ENDPOINT_HOSTS)])
   expect(a.ca.certPath).toBe(b.ca.certPath)
   expect(a.leaf.certPath).toBe(b.leaf.certPath)
-  // Exactly one of the two published each certificate; the other used it.
-  expect([a.ca.outcome, b.ca.outcome].toSorted()).toEqual(['generated', 'reused'])
-  expect([a.leaf.outcome, b.leaf.outcome].toSorted()).toEqual(['generated', 'reused'])
+  // Exactly one of the two published each certificate; the other found it or lost the race to it.
+  for (const outcomes of [[a.ca.outcome, b.ca.outcome], [a.leaf.outcome, b.leaf.outcome]]) {
+    expect(outcomes.filter(outcome => outcome === 'generated')).toEqual(['generated'])
+  }
   expect((await run(['openssl', 'verify', '-CAfile', a.ca.certPath, b.leaf.certPath])).code).toBe(0)
   // No scratch directory is left behind.
   const published = [a.ca.certPath, a.leaf.certPath].map(path => basename(dirname(path)))
   expect((await readdir(dir)).toSorted()).toEqual(published.toSorted())
 })
 
-test('when two builds of one name overlap, the first rename publishes and the other uses it', async () => {
+test('when two builds of one name overlap, the first rename publishes and the other loses the race and uses it', async () => {
   const dir = await fresh()
   // Neither build finishes until both have started, so both have found the name unpublished.
   const { promise: bothStarted, resolve } = Promise.withResolvers<void>()
@@ -131,7 +132,7 @@ test('when two builds of one name overlap, the first rename publishes and the ot
     await Bun.write(join(scratch, 'built-by'), text)
   }
   const [a, b] = await Promise.all([publish(dir, 'x', ['recipe'], build('a')), publish(dir, 'x', ['recipe'], build('b'))])
-  expect([a.outcome, b.outcome].toSorted()).toEqual(['generated', 'reused'])
+  expect([a.outcome, b.outcome].toSorted()).toEqual(['generated', 'lost-race'])
   expect(a.path).toBe(b.path)
   expect(await read(join(a.path, 'built-by'))).toBe(a.outcome === 'generated' ? 'a' : 'b')
   expect(await readdir(dir)).toEqual([basename(a.path)])
