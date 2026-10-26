@@ -5,8 +5,8 @@ import { z } from 'zod'
 
 // [LAW:one-source-of-truth] The one declaration of what a synthetic UUID looks like. The default
 // account, every test that needs another account, and the repo-safety scan all build or recognize
-// UUIDs through this prefix, so the scan's allowlist is this form and not a hand-kept list. A random
-// v4 UUID carries this all-zero prefix with probability about 2^-50.
+// UUIDs through this prefix, so the scan's allowlist is this form and not a hand-kept list. The prefix
+// fixes 74 of a random v4 UUID's 122 random bits, so a real UUID matches it with probability 2^-74.
 const SYNTHETIC_UUID_PREFIX = '00000000-0000-4000-8000-'
 const SYNTHETIC_UUID_DIGITS = 12
 const SYNTHETIC_UUID = new RegExp(`^${SYNTHETIC_UUID_PREFIX}[0-9a-f]{${SYNTHETIC_UUID_DIGITS}}$`)
@@ -22,25 +22,33 @@ export function isSyntheticUuid(text: string): boolean {
   return SYNTHETIC_UUID.test(text)
 }
 
-// [LAW:domain-language] Field names are Claude Code's own: the `oauthAccount` block of its config
-// plus the credential's `subscriptionType`, so `login` and the generators copy them across unrenamed.
-// Strict, so a misspelled key in an override is rejected by name instead of ignored.
+// [LAW:domain-language] The five facts PROJECT.md names, under the names Claude Code gives them in
+// its `oauthAccount` config block and its credential, so `login` and the generators copy them across
+// unrenamed. Strict, so a misspelled key in an override is rejected by name instead of ignored.
 export const AccountSchema = z.strictObject({
   accountUuid: z.uuid(),
   emailAddress: z.email(),
   organizationUuid: z.uuid(),
-  organizationName: z.string().min(1),
+  organizationName: z.string().regex(/\S/, 'must not be blank'),
   subscriptionType: z.enum(['pro', 'max', 'team', 'enterprise']),
 })
 
 export type Account = z.infer<typeof AccountSchema>
+
+// Every way an account input can be wrong, so a command maps a bad `--account FILE` to exit 2 by type.
+export class InvalidAccountError extends Error {
+  constructor(origin: string, reason: string, options?: ErrorOptions) {
+    super(`invalid account in ${origin}: ${reason}`, options)
+    this.name = 'InvalidAccountError'
+  }
+}
 
 // [LAW:parse-dont-validate] [LAW:single-enforcer] The one checkpoint an account crosses. `origin`
 // says where the value came from, so the error names both the source and every bad field.
 export function parseAccount(value: unknown, origin: string): Account {
   const result = AccountSchema.safeParse(value)
   if (!result.success) {
-    throw new Error(`invalid account in ${origin}:\n${z.prettifyError(result.error)}`)
+    throw new InvalidAccountError(origin, `\n${z.prettifyError(result.error)}`)
   }
   return result.data
 }
@@ -59,12 +67,14 @@ export const DEFAULT_ACCOUNT: Account = parseAccount(
 // [LAW:effects-at-boundaries] The consumer override: a JSON file holding a complete account, which
 // replaces the default whole. serve, login, and run all resolve `--account FILE` through this.
 export async function readAccountFile(path: string): Promise<Account> {
-  const text = await Bun.file(path).text()
+  const text = await Bun.file(path).text().catch((error: Error) => {
+    throw new InvalidAccountError(path, `cannot read: ${error.message}`, { cause: error })
+  })
   let value: unknown
   try {
     value = JSON.parse(text)
   } catch (error) {
-    throw new Error(`invalid account in ${path}: not JSON: ${(error as Error).message}`, { cause: error })
+    throw new InvalidAccountError(path, `not JSON: ${(error as Error).message}`, { cause: error })
   }
   return parseAccount(value, path)
 }

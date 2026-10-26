@@ -7,6 +7,7 @@ import {
   type Account,
   AccountSchema,
   DEFAULT_ACCOUNT,
+  InvalidAccountError,
   isSyntheticUuid,
   readAccountFile,
   syntheticUuid,
@@ -15,7 +16,7 @@ import {
 const dir = await mkdtemp(join(tmpdir(), 'mock-anthropic-account-'))
 afterAll(() => rm(dir, { recursive: true, force: true }))
 
-async function writeFile(name: string, content: string): Promise<string> {
+async function writeAccountFile(name: string, content: string): Promise<string> {
   const path = join(dir, name)
   await Bun.write(path, content)
   return path
@@ -64,35 +65,44 @@ describe('the default account', () => {
 
 describe('an account file', () => {
   test('replaces the default with exactly the account it holds', async () => {
-    const path = await writeFile('other.json', JSON.stringify(OTHER_ACCOUNT))
+    const path = await writeAccountFile('other.json', JSON.stringify(OTHER_ACCOUNT))
     expect(await readAccountFile(path)).toEqual(OTHER_ACCOUNT)
   })
 
   test('with a bad field is rejected naming the file and the field', async () => {
-    const path = await writeFile('bad-uuid.json', JSON.stringify({ ...OTHER_ACCOUNT, organizationUuid: 'nope' }))
+    const path = await writeAccountFile('bad-uuid.json', JSON.stringify({ ...OTHER_ACCOUNT, organizationUuid: 'nope' }))
     const error = readAccountFile(path)
+    await expect(error).rejects.toBeInstanceOf(InvalidAccountError)
     await expect(error).rejects.toThrow(path)
     await expect(error).rejects.toThrow('organizationUuid')
   })
 
   test('with a missing field is rejected naming the field', async () => {
     const { emailAddress: _, ...partial } = OTHER_ACCOUNT
-    const path = await writeFile('missing.json', JSON.stringify(partial))
+    const path = await writeAccountFile('missing.json', JSON.stringify(partial))
     await expect(readAccountFile(path)).rejects.toThrow('emailAddress')
   })
 
   test('with an unknown key is rejected naming the key', async () => {
-    const path = await writeFile('extra.json', JSON.stringify({ ...OTHER_ACCOUNT, acountUuid: syntheticUuid(5) }))
+    const path = await writeAccountFile('extra.json', JSON.stringify({ ...OTHER_ACCOUNT, acountUuid: syntheticUuid(5) }))
     await expect(readAccountFile(path)).rejects.toThrow('acountUuid')
   })
 
   test('that is not JSON is rejected naming the file', async () => {
-    const path = await writeFile('broken.json', '{ not json')
-    await expect(readAccountFile(path)).rejects.toThrow(path)
+    const path = await writeAccountFile('broken.json', '{ not json')
+    await expect(readAccountFile(path)).rejects.toThrow(`invalid account in ${path}: not JSON`)
   })
 
-  test('that does not exist is rejected naming the file', async () => {
-    const path = join(dir, 'absent.json')
-    await expect(readAccountFile(path)).rejects.toThrow(path)
+  test('that cannot be read is rejected naming the file', async () => {
+    for (const path of [join(dir, 'absent.json'), dir]) {
+      const error = readAccountFile(path)
+      await expect(error).rejects.toBeInstanceOf(InvalidAccountError)
+      await expect(error).rejects.toThrow(`invalid account in ${path}: cannot read`)
+    }
+  })
+
+  test('with a blank organization name is rejected naming the field', async () => {
+    const path = await writeAccountFile('blank.json', JSON.stringify({ ...OTHER_ACCOUNT, organizationName: ' ' }))
+    await expect(readAccountFile(path)).rejects.toThrow('organizationName')
   })
 })
