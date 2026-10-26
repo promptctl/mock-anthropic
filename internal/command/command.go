@@ -42,8 +42,10 @@ type Result struct {
 // without it.
 type Kind int
 
+// A Kind's zero value is no kind, so a command registered without one fails rather than run as a Task.
 const (
-	Task Kind = iota
+	_ Kind = iota
+	Task
 	Service
 )
 
@@ -158,6 +160,9 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	cmd, found := commands[argv[0]]
 	if !found {
 		return usage(commands, stderr, "unknown command: "+argv[0]), nil
+	}
+	if cmd.Kind != Task && cmd.Kind != Service {
+		return failed(nil, fmt.Errorf("command %s is registered with no Kind", argv[0]), Facts{}), nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

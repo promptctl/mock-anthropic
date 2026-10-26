@@ -197,3 +197,13 @@ func TestSecondSignalEndsAStoppingService(t *testing.T) {
 	}
 	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "SIGINT", "why": "SIGINT before the command finished\nSIGINT while the command was ending"})
 }
+
+func TestCommandWithNoKindFails(t *testing.T) {
+	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string) (Result, error) {
+		return Result{Answer: OK}, nil
+	}}}, []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "why": "command stand_in is registered with no Kind"})
+}
