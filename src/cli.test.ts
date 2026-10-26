@@ -3,6 +3,7 @@ import net from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_ACCOUNT, syntheticUuid } from './account.ts'
+import { ENDPOINT_TABLE } from './endpoints.ts'
 import type { Signal } from './log.ts'
 import { scriptDirectories, writeScript } from './testing.ts'
 
@@ -169,6 +170,30 @@ process.exitCode = await main(COMMANDS, ['serve', '--port', '0'])
   })
 })
 
+describe('coverage', () => {
+  test('lists every endpoint of the table, answers yes on the tree, and records the counts', async () => {
+    const result = await run('coverage')
+    expect(result.exit).toBe(0)
+    const listed = result.stdout.trimEnd().split('\n').map(line => line.split(/ {2,}/))
+    const { endpoints } = ENDPOINT_TABLE
+    expect(listed.map(([status, method, url]) => [status, method, url])).toEqual(
+      endpoints.map(row => [row.scope === 'in-scope' ? 'answered' : 'out of scope', row.method, `${row.host}${row.path}`]),
+    )
+    expect(listed.map(line => line[3])).toEqual(endpoints.map(row => (row.scope === 'in-scope' ? row.id : `${row.id}: ${row.reason}`)))
+    expect(result.record).toMatchObject({
+      outcome: 'ok',
+      exit: 0,
+      argv: ['coverage'],
+      ended_by: null,
+      facts: {
+        answered: endpoints.filter(row => row.scope === 'in-scope').length,
+        out_of_scope: endpoints.filter(row => row.scope === 'out-of-scope').length,
+        no_generator: [],
+      },
+    })
+  })
+})
+
 describe('a wrong command line', () => {
   const cases: [string, string[], string][] = [
     ['no command', [], 'no command given'],
@@ -182,6 +207,7 @@ describe('a wrong command line', () => {
     ['an empty scripts directory path', ['serve', '--scenarios', ''], '--scenarios: an empty path'],
     ['an empty account file path', ['serve', '--account', ''], '--account: an empty path'],
     ['a flag that takes one value, given twice', ['serve', '--port', '0', '--port', '1'], '--port: given more than once'],
+    ['an argument to coverage', ['coverage', 'extra'], 'extra'],
   ]
   for (const [what, args, named] of cases) {
     test(`${what}: exit 2, a USAGE record naming the cause, nothing on stdout`, async () => {
