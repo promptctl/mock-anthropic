@@ -92,7 +92,7 @@ const HTTPS_PORT = 443
 const TUNNEL_UNANSWERED =
   "closed before any request reached the mock: a client that does not trust the mock's CA (NODE_EXTRA_CA_CERTS) closes its tunnel this way, and so do a request Bun.serve answers itself as malformed or with oversized headers, and a client that opens a tunnel and never uses it"
 const PLAIN_UNANSWERED =
-  'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head leaves this way too'
+  'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head, or ends its side (a half-close) before the mock has read the request, leaves this way too'
 const UNFINISHED_LINE = 'closed before finishing its request line'
 // An HTTP/1 request line: a method (a token, RFC 9110 5.6.2; every method Claude Code sends is capitals,
 // and the line is refused as malformed otherwise), a target, and
@@ -315,11 +315,12 @@ function notARequest(byte: number): string {
 // keeps its raw text as the host and has a null port, so its refusal can still name it.
 function connectTarget(text: string): { host: string; port: number } | { host: string; port: null } {
   // The port is read from the text, not from a URL, which drops a port equal to its scheme's default.
-  // Authority form (RFC 9110 9.3.6) is a host and a port alone, so userinfo, a path, a query or a
-  // fragment makes the target malformed rather than something URL quietly strips.
-  const [, authority, port] = /^([^@/?#]+):(\d{1,5})$/.exec(text) ?? []
-  const host = authority === undefined ? null : URL.parse(`http://${authority}/`)?.hostname
-  return host === null || host === undefined || Number(port) > 65535 ? { host: text, port: null } : { host, port: Number(port) }
+  // Authority form (RFC 9110 9.3.6) is a host and a port alone. URL quietly strips userinfo and paths
+  // and decodes escapes and backslashes, so its host is taken only when it reads the text back as
+  // itself, up to case, and any other target is malformed.
+  const [, authority, port] = /^(.+):(\d{1,5})$/.exec(text) ?? []
+  const host = authority === undefined ? undefined : URL.parse(`http://${authority}/`)?.hostname
+  return host !== undefined && host === authority?.toLowerCase() && Number(port) <= 65535 ? { host, port: Number(port) } : { host: text, port: null }
 }
 
 function refuse(client: net.Socket, status: string, what: string): void {

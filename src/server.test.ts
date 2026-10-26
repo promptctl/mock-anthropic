@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -428,7 +428,7 @@ describe('a plain connection that is not served', () => {
       event: 'connection',
       tunnel: null,
       requests: 0,
-      why: 'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head leaves this way too',
+      why: 'closed before any request reached the mock: Bun.serve answers a malformed request or oversized headers itself, before the mock sees it, and a client that closes partway through its request head, or ends its side (a half-close) before the mock has read the request, leaves this way too',
     })
     await mock.server.stop()
   })
@@ -452,7 +452,7 @@ describe('a plain connection that is not served', () => {
 })
 
 describe('CONNECT refusals', () => {
-  for (const target of [`user@${API}:443`, `${API}/x:443`]) {
+  for (const target of [`user@${API}:443`, `${API}/x:443`, `${API}\\x:443`, `api%2eanthropic.com:443`]) {
     test(`a target with more than a host and port (${target}) is refused as malformed`, async () => {
       const mock = await start()
       const reply = await raw(mock.server.port, `CONNECT ${target} HTTP/1.1\r\nHost: ${API}:443\r\n\r\n`)
@@ -576,6 +576,52 @@ describe('stop', () => {
       { event: 'connection', tunnel: null, requests: 1, closed_by: 'stop', outcome: 'closed' },
     ])
     await expect(reader.read()).rejects.toThrow()
+  })
+})
+
+// The directory of a server's inner unix sockets, found as the one that appeared while it started.
+async function startWithSocketDir(): Promise<{ mock: Running; socketDir: string }> {
+  const socketDirs = async () => (await readdir(tmpdir())).filter(name => name.startsWith('mock-anthropic-') && !name.startsWith('mock-anthropic-server-'))
+  const before = new Set(await socketDirs())
+  const mock = await start()
+  const [socketDir] = (await socketDirs()).filter(name => !before.has(name))
+  return { mock, socketDir: join(tmpdir(), socketDir!) }
+}
+
+describe('a connection whose inner side breaks', () => {
+  test('an inner server that cannot start ends the connection at once, and its FAILED line says why', async () => {
+    const { mock, socketDir } = await startWithSocketDir()
+    await chmod(socketDir, 0o500)
+    try {
+      await expect(fetch(`http://127.0.0.1:${mock.server.port}/hello`, { method: 'POST' })).rejects.toThrow()
+      expect(record(await mock.line('FAILED '))).toMatchObject({
+        event: 'connection',
+        requests: 0,
+        closed_by: 'server',
+        why: expect.stringMatching(/^inner server could not start: EACCES/),
+      })
+    } finally {
+      await chmod(socketDir, 0o700)
+    }
+    await mock.server.stop()
+  })
+
+  test('an inner side the front cannot connect to ends the connection, and its FAILED line says why', async () => {
+    const mock = await start()
+    // A socket created under a full umask cannot be connected to.
+    const umask = process.umask(0o777)
+    try {
+      await expect(fetch(`http://127.0.0.1:${mock.server.port}/hello`, { method: 'POST' })).rejects.toThrow()
+    } finally {
+      process.umask(umask)
+    }
+    expect(record(await mock.line('FAILED '))).toMatchObject({
+      event: 'connection',
+      requests: 0,
+      closed_by: 'server',
+      why: expect.stringMatching(/^inner side failed: /),
+    })
+    await mock.server.stop()
   })
 })
 
