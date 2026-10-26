@@ -192,11 +192,11 @@ func Ensure(dir string, hosts []string) (Certificates, error) {
 	if err != nil {
 		return Certificates{}, err
 	}
-	fingerprint, err := fingerprint(ca.CertPath)
+	caFingerprint, err := fingerprint(ca.CertPath)
 	if err != nil {
 		return Certificates{}, err
 	}
-	leaf, err := issue(dir, "leaf", fingerprint, leafRecipe(hosts, ca))
+	leaf, err := issue(dir, "leaf", caFingerprint, leafRecipe(hosts, ca))
 	if err != nil {
 		return Certificates{}, err
 	}
