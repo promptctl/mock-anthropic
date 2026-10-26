@@ -9,13 +9,11 @@ const { directory } = await scriptDirectories('service-generators')
 const API = 'https://api.anthropic.com'
 const send = (method: Method, url: string, body = '') => sendTo(mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] }), method, url, body)
 
-// What Claude Code sends, as far as the answer depends on it. 2.1.289 may gzip an event batch, which
-// reaches a generator as the server reads every body: decoded as UTF-8 text.
-const GZIPPED_BATCH = new TextDecoder().decode(Bun.gzipSync('{"events":[]}'))
+// What Claude Code sends, as far as the answer depends on it.
 const ANSWERS: readonly { name: string; method: Method; url: string; body?: string; status: number; type: string | null; answer: string }[] = [
   { name: 'feature-flag eval', method: 'POST', url: `${API}/api/eval/sdk-mock`, body: '{"attributes":{}}', status: 200, type: 'application/json', answer: '{"features":{}}' },
   { name: 'event logging batch', method: 'POST', url: `${API}/api/event_logging/batch`, body: '{"events":[]}', status: 200, type: 'application/json', answer: '{}' },
-  { name: 'event logging v2 batch, gzipped', method: 'POST', url: `${API}/api/event_logging/v2/batch`, body: GZIPPED_BATCH, status: 200, type: 'application/json', answer: '{}' },
+  { name: 'event logging v2 batch', method: 'POST', url: `${API}/api/event_logging/v2/batch`, body: '{"events":[]}', status: 200, type: 'application/json', answer: '{}' },
   { name: 'Datadog log intake', method: 'POST', url: 'https://http-intake.logs.us5.datadoghq.com/api/v2/logs', body: '[]', status: 200, type: 'application/json', answer: '{}' },
   { name: 'metrics_enabled', method: 'GET', url: `${API}/api/claude_code/organizations/metrics_enabled`, status: 200, type: 'application/json', answer: '{"metrics_logging_enabled":false}' },
   { name: 'remote managed settings, none', method: 'GET', url: `${API}/api/claude_code/settings`, status: 204, type: null, answer: '' },
@@ -82,15 +80,16 @@ describe('token counting', () => {
     expect(await count(request('hello '.repeat(100)))).toBeGreaterThan(short)
   })
 
-  // [LAW:one-source-of-truth] A Messages reply's input is counted as a token count of the same body is.
-  test('a request counts what a Messages reply to it reports as its input', async () => {
+  // [LAW:one-source-of-truth] A conversation counts the same as a token count request and as a Messages
+  // request, which also carries the fields that shape only the reply.
+  test('a conversation counts what a Messages reply to it reports as its input', async () => {
     const body = request('hello')
     const script = { reply: { kind: 'message', content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn' } }
     const dir = await directory({ 'a.json': script })
-    const messagesBody = JSON.stringify({ ...JSON.parse(body), max_tokens: 16 })
+    const messagesBody = JSON.stringify({ ...JSON.parse(body), max_tokens: 32000, stream: false, metadata: { user_id: 'someone' } })
     const reply = await sendTo(mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [dir] }), 'POST', `${API}/v1/messages`, messagesBody)
     const usage = ((await reply.response.json()) as { usage: { input_tokens: number } }).usage
-    expect(usage.input_tokens).toBe(await count(messagesBody))
+    expect(usage.input_tokens).toBe(await count(body))
   })
 
   for (const [name, body, why] of [

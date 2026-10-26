@@ -107,9 +107,9 @@ function tokens(text: string): number {
 }
 
 // [LAW:one-source-of-truth] A request's input tokens, the one count both a Messages reply's usage and
-// a token count answer give, so the two agree on the same request.
+// a token count answer give, so the two agree on the same conversation.
 export function inputTokens(request: MessagesRequest | CountTokensRequest): number {
-  return tokens(request.raw)
+  return tokens(request.input)
 }
 
 // A server-sent event of the Messages stream: its `type` is also its SSE event name.

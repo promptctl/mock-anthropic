@@ -12,7 +12,7 @@ import { inputTokens } from './render.ts'
 // [LAW:one-type-per-behavior] A fixed answer: the same response to every request, with nothing decided
 // to report. A Response is read once, so each request gets a new one.
 const fixed = (make: () => Response) => (): Answer => ({ kind: 'response', response: make(), facts: {} })
-const json = (body: Json) => (): Answer => answer(body, {})
+const json = (body: Json) => fixed(() => Response.json(body))
 const text = (body: string) => fixed(() => new Response(body, { headers: { 'content-type': 'text/plain; charset=utf-8' } }))
 
 // The marketplace commit the version pointer names, obviously not a real one.
@@ -31,7 +31,8 @@ export function serviceGenerators() {
       // [LAW:nothing-unseen] The count given, for the record.
       return answer({ input_tokens }, { input_tokens })
     },
-    // Every flag at its default. Both builds read an empty map as no payload, and keep their defaults.
+    // No flags. Both builds read an empty map as no payload and keep the flags the config dir cached,
+    // so a fresh one runs every flag at its default.
     'feature-flag-eval': json({ features: {} }),
     // Neither build reads these answers, and 2.1.289 may gzip what it sends, so the body is not read.
     'event-logging-batch': json({}),
@@ -44,7 +45,9 @@ export function serviceGenerators() {
     // No restrictions. 2.1.289 reads a 404 here as a proxy that did not forward the request.
     'policy-limits': json({ restrictions: {} }),
     'penguin-mode': json({ enabled: false, disabled_reason: null }),
-    // Off, so the consent notice never runs, nor its refused `account-settings` call.
+    // Off. Claude Code decides from the config dir's cached answer, which this one replaces in the
+    // background, so on a fresh config dir the consent notice and its refused `account-settings` call
+    // never run.
     'grove-config': json({ grove_enabled: false, domain_excluded: false, notice_is_grace_period: true, notice_reminder_frequency: null }),
     // No servers. 2.1.289 asks for the next page while `metadata.nextCursor` is set.
     'mcp-registry': json({ servers: [], metadata: {} }),

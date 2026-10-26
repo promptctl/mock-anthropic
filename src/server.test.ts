@@ -339,6 +339,16 @@ describe('as a plain origin', () => {
     await mock.server.stop()
   })
 
+  // 2.1.289 may gzip an event batch. The mock does not decode it, and still serves it.
+  test('a gzip-encoded body is served, as the bytes sent read as text', async () => {
+    const mock = await start()
+    const sent = Bun.gzipSync('{"events":[]}')
+    const response = await fetch(`http://127.0.0.1:${mock.server.port}/hello`, { method: 'POST', headers: { 'content-encoding': 'gzip' }, body: sent })
+    expect(await response.text()).toBe(`hello ${API} ${new TextDecoder().decode(sent)}`)
+    expect(record(await mock.line('SERVED '))).toMatchObject({ endpoint: 'hello' })
+    await mock.server.stop()
+  })
+
   test('a HEAD request gets its headers with no body and its line, and stop() still returns', async () => {
     const mock = await start()
     const plain = await fetch(`http://127.0.0.1:${mock.server.port}/nowhere`, { method: 'HEAD' })

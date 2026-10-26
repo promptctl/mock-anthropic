@@ -170,7 +170,7 @@ describe('a JSON message', () => {
       stop_sequence: null,
       usage: { input_tokens: expect.any(Number), cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: expect.any(Number) },
     })
-    expect(body.usage.input_tokens).toBe(Math.ceil(sent.raw.length / 4))
+    expect(body.usage.input_tokens).toBe(Math.ceil(sent.input.length / 4))
     expect(body.usage.output_tokens).toBeGreaterThan(1)
     expect(rendered).toEqual({ kind: 'json', id: body.id, stop_reason: 'tool_use' })
   })
