@@ -53,12 +53,6 @@ export type ClosedBy = Closer | 'server'
 
 export type ServerEvent = RequestEvent | ConnectionEvent
 
-// The line `serve` writes to stderr for an event: its outcome in capitals, so a consumer can fail on
-// any line that starts with UNMATCHED, REFUSED or FAILED, then the whole record as JSON.
-export function eventLine(event: ServerEvent): string {
-  return `${event.outcome.toUpperCase()} ${JSON.stringify(event)}`
-}
-
 export type ServerOptions<R extends EndpointRow> = {
   readonly port: number
   readonly table: EndpointTable<R>
