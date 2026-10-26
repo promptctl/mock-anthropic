@@ -151,7 +151,7 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 		{"null value", writeJSON(t, with("accountUuid", json.RawMessage("null"))), []string{"accountUuid", "not a string"}},
 		{"wrong-case key", writeJSON(t, with("accountuuid", SyntheticUUID(5))), []string{`"accountuuid": unknown key`}},
 		{"duplicate key", writeFile(t, `{"accountUuid":"`+SyntheticUUID(3)+`","accountUuid":"`+SyntheticUUID(5)+`"}`), []string{"accountUuid: given more than once"}},
-		{"nil uuid", writeJSON(t, with("organizationUuid", "00000000-0000-0000-0000-000000000000")), []string{"organizationUuid"}},
+		{"nil uuid", writeJSON(t, with("organizationUuid", strings.Replace(SyntheticUUID(0), "-4000-8000-", "-0000-0000-", 1))), []string{"organizationUuid"}},
 		{"upper-case uuid", writeJSON(t, with("accountUuid", strings.ToUpper(SyntheticUUID(0xabc)))), []string{"accountUuid"}},
 		{"undotted email domain", writeJSON(t, with("emailAddress", "a@b")), []string{"emailAddress"}},
 		{"domain literal email", writeJSON(t, with("emailAddress", "a@[1.2.3.4]")), []string{"emailAddress"}},
@@ -164,7 +164,7 @@ func TestBadFilesAreRejectedNamingFileAndField(t *testing.T) {
 		{"overlong label email", writeJSON(t, with("emailAddress", "a@"+strings.Repeat("b", 64)+".invalid")), []string{"emailAddress"}},
 		{"truncated keeps field problems", writeFile(t, `{"accountUuid":"x"`), []string{"accountUuid: not", "ends before the object closes"}},
 		{"empty", writeFile(t, ""), []string{"empty"}},
-		{"bounded raw echo", writeFile(t, `{"organizationName":`+strings.Repeat("7", 500)+`}`), []string{"organizationName: not a string, got \""+strings.Repeat("7", 40)+"\"..."}},
+		{"bounded raw echo", writeFile(t, `{"organizationName":`+strings.Repeat("7", 500)+`}`), []string{"organizationName: not a string, got \"" + strings.Repeat("7", 40) + "\"..."}},
 		{"not an object", writeFile(t, "null"), []string{"not a JSON object"}},
 		{"not JSON", writeFile(t, "{ not json"), []string{"not JSON"}},
 		{"absent file", filepath.Join(dir, "absent.json"), []string{"cannot read"}},
@@ -202,5 +202,22 @@ func TestEveryBadKeyIsNamedAtOnce(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), name) {
 			t.Errorf("got %v, want %s named", err, name)
 		}
+	}
+}
+
+// Foreign UUIDs are built at run time: a literal one would fail the repo-safety test.
+func TestForeignUUIDsFindsEveryOtherUUIDShape(t *testing.T) {
+	synthetic := SyntheticUUID(7)
+	otherVersion := strings.Replace(synthetic, "-4000-", "-1000-", 1)
+	upper := strings.ToUpper(SyntheticUUID(0xabc))
+	embedded := "f" + synthetic[1:]
+	data := []byte(synthetic + " " + otherVersion + "\n\"" + upper + "\" id=" + embedded + "x")
+	got := ForeignUUIDs(data)
+	want := []string{otherVersion, upper, embedded}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ForeignUUIDs = %q, want %q", got, want)
+	}
+	if got := ForeignUUIDs([]byte(synthetic + SyntheticUUID(1))); got != nil {
+		t.Errorf("synthetic UUIDs reported as foreign: %q", got)
 	}
 }

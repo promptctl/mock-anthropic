@@ -38,6 +38,21 @@ func SyntheticUUID(n uint64) string {
 // IsSyntheticUUID reports whether s is exactly a UUID SyntheticUUID builds.
 func IsSyntheticUUID(s string) bool { return syntheticForm.MatchString(s) }
 
+// uuidShape is anything that could be a real identifier: 8-4-4-4-12 hex in either case, of any
+// version or variant. Wider than uuidForm on purpose; a scan must not miss what a parser refuses.
+var uuidShape = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+// ForeignUUIDs returns every UUID-shaped string in data that IsSyntheticUUID does not recognize.
+func ForeignUUIDs(data []byte) []string {
+	var foreign []string
+	for _, m := range uuidShape.FindAll(data, -1) {
+		if !IsSyntheticUUID(string(m)) {
+			foreign = append(foreign, string(m))
+		}
+	}
+	return foreign
+}
+
 // SubscriptionType is the plan the account is on.
 type SubscriptionType string
 
