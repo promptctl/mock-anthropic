@@ -25,17 +25,20 @@ export function isSyntheticUuid(text: string): boolean {
 // [LAW:domain-language] The five facts PROJECT.md names, under the names Claude Code gives them in
 // its `oauthAccount` config block and its credential, so `login` and the generators copy them across
 // unrenamed. Strict, so a misspelled key in an override is rejected by name instead of ignored.
-export const AccountSchema = z.strictObject({
+// [LAW:parse-dont-validate] Branded and readonly: an Account exists only as this schema's output,
+// frozen, so no literal can pose as one and no consumer can change the one shared identity value.
+const AccountSchema = z
+  .strictObject({
   accountUuid: z.uuid(),
   emailAddress: z.email(),
   organizationUuid: z.uuid(),
   organizationName: z.string().regex(/\S/, 'must not be blank'),
   subscriptionType: z.enum(['pro', 'max', 'team', 'enterprise']),
-})
+  })
+  .brand<'Account'>()
+  .readonly()
 
-// Readonly, and frozen by parseAccount: every identity response is built from one shared value, so
-// no consumer may change it.
-export type Account = Readonly<z.infer<typeof AccountSchema>>
+export type Account = z.infer<typeof AccountSchema>
 
 // Every way an account input can fail (unreadable, not JSON, schema), so a command maps a bad
 // `--account FILE` to exit 2 by type.
@@ -53,7 +56,7 @@ export function parseAccount(value: unknown, origin: string): Account {
   if (!result.success) {
     throw new AccountInputError(origin, z.prettifyError(result.error))
   }
-  return Object.freeze(result.data)
+  return result.data
 }
 
 export const DEFAULT_ACCOUNT: Account = parseAccount(

@@ -4,11 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import {
-  type Account,
-  AccountSchema,
   DEFAULT_ACCOUNT,
   AccountInputError,
   isSyntheticUuid,
+  parseAccount,
   readAccountFile,
   syntheticUuid,
 } from './account.ts'
@@ -22,7 +21,7 @@ async function writeAccountFile(name: string, content: string): Promise<string> 
   return path
 }
 
-const OTHER_ACCOUNT: Account = {
+const OTHER_ACCOUNT = {
   accountUuid: syntheticUuid(3),
   emailAddress: 'other@mock-anthropic.invalid',
   organizationUuid: syntheticUuid(4),
@@ -56,7 +55,7 @@ describe('synthetic UUIDs', () => {
 
 describe('the default account', () => {
   test('parses and carries only synthetic identifiers', () => {
-    expect(AccountSchema.parse(DEFAULT_ACCOUNT)).toEqual(DEFAULT_ACCOUNT)
+    expect(parseAccount({ ...DEFAULT_ACCOUNT }, 'a copy of the default')).toEqual(DEFAULT_ACCOUNT)
     expect(isSyntheticUuid(DEFAULT_ACCOUNT.accountUuid)).toBe(true)
     expect(isSyntheticUuid(DEFAULT_ACCOUNT.organizationUuid)).toBe(true)
     expect(DEFAULT_ACCOUNT.emailAddress).toEndWith('.invalid')
@@ -73,7 +72,9 @@ describe('the default account', () => {
 describe('an account file', () => {
   test('replaces the default with exactly the account it holds', async () => {
     const path = await writeAccountFile('other.json', JSON.stringify(OTHER_ACCOUNT))
-    expect(await readAccountFile(path)).toEqual(OTHER_ACCOUNT)
+    const account: object = await readAccountFile(path)
+    expect(account).toEqual(OTHER_ACCOUNT)
+    expect(Object.isFrozen(account)).toBe(true)
   })
 
   test('with a bad field is rejected naming the file and the field', async () => {
@@ -82,7 +83,8 @@ describe('an account file', () => {
     await expect(error).rejects.toBeInstanceOf(AccountInputError)
     await expect(error).rejects.toThrow(path)
     await expect(error).rejects.toThrow('organizationUuid')
-    await expect(error).rejects.toThrow(`account from ${path}: ✖`)
+    await expect(error).rejects.toThrow(new RegExp(`^account from ${path}: \\S[^]*\\S$`))
+    await expect(error).rejects.not.toThrow(/\s\n/)
   })
 
   test('with a missing field is rejected naming the field', async () => {
@@ -98,14 +100,14 @@ describe('an account file', () => {
 
   test('that is not JSON is rejected naming the file', async () => {
     const path = await writeAccountFile('broken.json', '{ not json')
-    await expect(readAccountFile(path)).rejects.toThrow(`account from ${path}: not JSON: SyntaxError`)
+    await expect(readAccountFile(path)).rejects.toThrow(`account from ${path}: not JSON`)
   })
 
   test('that cannot be read is rejected naming the file', async () => {
     for (const path of [join(dir, 'absent.json'), dir]) {
       const error = readAccountFile(path)
       await expect(error).rejects.toBeInstanceOf(AccountInputError)
-      await expect(error).rejects.toThrow(`account from ${path}: cannot read: Error`)
+      await expect(error).rejects.toThrow(`account from ${path}: cannot read`)
     }
   })
 
