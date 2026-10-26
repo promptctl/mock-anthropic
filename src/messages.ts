@@ -23,7 +23,10 @@ const ToolResultBlock = z
   .object({ type: z.literal(TOOL_RESULT), content: contentOf(z.union([TextBlock, OtherBlock])).optional() })
   .transform(block => block.content ?? [])
 const Content = contentOf(z.union([TextBlock, ToolResultBlock, OtherBlock]))
-const Message = z.object({ role: z.enum(['user', 'assistant']), content: Content })
+// `system` is a role Claude Code sends in `messages` (2.1.289 puts a hook's added context there),
+// though the API's own documentation names only `user` and `assistant`. Its texts are the
+// conversation's, not the system prompt's, so they never reach `systemTexts`.
+const Message = z.object({ role: z.enum(['user', 'assistant', 'system']), content: Content })
 
 // The system prompt is a string or a list of text blocks, the only block type the API admits there;
 // each block stays one text, so a prompt is recognized by how its own block opens.
