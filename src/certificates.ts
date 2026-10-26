@@ -1,6 +1,6 @@
 import { createHash, randomBytes, X509Certificate } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // PROJECT.md "How a program reaches it": the CA a consumer trusts through NODE_EXTRA_CA_CERTS, and
@@ -13,18 +13,20 @@ export const CERTS_DIR = fileURLToPath(new URL('../certs', import.meta.url))
 // [LAW:nothing-unseen] Whether a start made a certificate or found one, for the start's own record.
 export type Outcome = 'generated' | 'reused'
 
-export type Certificates = {
-  readonly ca: { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
-  readonly leaf: { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
+export type Issued = { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
+
+export type Certificates = { readonly ca: Issued; readonly leaf: Issued }
+
+// What a certificate is built from, run in its own directory: openssl.cnf holds `config`, each
+// `prepare` command runs, then `issue` writes the certificate.
+type Recipe = {
+  readonly config: string
+  readonly prepare: readonly (readonly string[])[]
+  readonly issue: readonly string[]
 }
 
-// What each certificate is built from: openssl.cnf, then each command, run in the certificate's own
-// directory. The leaf's signing command also gets the CA and a serial, which are not part of its recipe.
 const KEY = 'rsa:2048'
 const DAYS = '3650'
-const CA_REQUEST = ['req', '-x509', '-newkey', KEY, '-nodes', '-days', DAYS, '-config', 'openssl.cnf', '-extensions', 'ca', '-keyout', 'key.pem', '-out', 'cert.pem']
-const LEAF_REQUEST = ['req', '-new', '-newkey', KEY, '-nodes', '-config', 'openssl.cnf', '-keyout', 'key.pem', '-out', 'request.csr']
-const LEAF_SIGN = ['x509', '-req', '-in', 'request.csr', '-days', DAYS, '-extfile', 'openssl.cnf', '-extensions', 'leaf', '-out', 'cert.pem']
 
 // Config files, not `-addext` or `-copy_extensions`: LibreSSL, the openssl macOS ships, has neither.
 const CA_CONFIG = `[req]
@@ -37,6 +39,21 @@ basicConstraints = critical, CA:true
 keyUsage = critical, keyCertSign, cRLSign
 subjectKeyIdentifier = hash
 `
+
+const CA: Recipe = {
+  config: CA_CONFIG,
+  prepare: [],
+  issue: ['req', '-x509', '-newkey', KEY, '-nodes', '-days', DAYS, '-config', 'openssl.cnf', '-extensions', 'ca', '-keyout', 'key.pem', '-out', 'cert.pem'],
+}
+
+// The leaf for `hosts`, signed by the CA whose files are at `signer`.
+function leafRecipe(hosts: readonly string[], signer: Omit<Issued, 'outcome'>): Recipe {
+  return {
+    config: leafConfig(hosts),
+    prepare: [['req', '-new', '-newkey', KEY, '-nodes', '-config', 'openssl.cnf', '-keyout', 'key.pem', '-out', 'request.csr']],
+    issue: ['x509', '-req', '-in', 'request.csr', '-days', DAYS, '-extfile', 'openssl.cnf', '-extensions', 'leaf', '-CA', signer.certPath, '-CAkey', signer.keyPath, '-out', 'cert.pem'],
+  }
+}
 
 function leafConfig(hosts: readonly string[]): string {
   return `[req]
@@ -102,31 +119,31 @@ export async function publish(
   }
 }
 
-// One certificate and its key in `scratch`. The key is made owner-only here: LibreSSL writes it 0644,
-// and a copy of the directory made without its 0700 mode would otherwise publish the CA's key.
-async function generate(scratch: string, config: string, steps: readonly (readonly string[])[]): Promise<void> {
-  await Bun.write(join(scratch, 'openssl.cnf'), config)
-  for (const step of steps) await openssl(step, scratch)
-  await chmod(join(scratch, 'key.pem'), 0o600)
-}
-
-// Where a published certificate directory keeps the files the openssl steps write.
+// Where a certificate directory keeps the files its recipe writes.
 const files = (path: string) => ({ certPath: join(path, 'cert.pem'), keyPath: join(path, 'key.pem') })
 
-// [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's recipe
-// holds the CA's fingerprint, so a replaced CA gets a new leaf too.
+// [LAW:one-source-of-truth] The directory is named by the recipe it runs, plus `basis`, whatever else
+// the result depends on, so what is built cannot drift from what names it. The serial is the one
+// input outside the recipe: every issue gets a fresh one. The key is made owner-only: LibreSSL writes
+// it 0644, and a copy of the directory made without its 0700 mode would otherwise publish the CA's key.
+async function issue(dir: string, kind: string, basis: readonly string[], recipe: Recipe): Promise<Issued> {
+  const { path, outcome } = await publish(dir, kind, [...basis, JSON.stringify(recipe)], async scratch => {
+    await Bun.write(join(scratch, 'openssl.cnf'), recipe.config)
+    for (const command of recipe.prepare) await openssl(command, scratch)
+    await openssl([...recipe.issue, '-set_serial', `0x${randomBytes(16).toString('hex')}`], scratch)
+    await chmod(join(scratch, 'key.pem'), 0o600)
+  })
+  return { ...files(path), outcome }
+}
+
+// [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's basis is
+// the CA's fingerprint, so a replaced CA gets a new leaf too. The leaf is built in a sibling of the
+// CA's directory and names the CA relative to it, so its recipe holds no absolute path.
 export async function ensureCertificates(dir: string, hosts: readonly string[]): Promise<Certificates> {
   await mkdir(dir, { recursive: true })
-  const ca = await publish(dir, 'ca', [CA_CONFIG, ...CA_REQUEST], scratch => generate(scratch, CA_CONFIG, [CA_REQUEST]))
-  const caFiles = files(ca.path)
-  const fingerprint = new X509Certificate(await Bun.file(caFiles.certPath).text()).fingerprint256
-  const config = leafConfig(hosts)
-  const sign = [...LEAF_SIGN, '-CA', caFiles.certPath, '-CAkey', caFiles.keyPath, '-set_serial', `0x${randomBytes(16).toString('hex')}`]
-  const leaf = await publish(dir, 'leaf', [fingerprint, config, ...LEAF_REQUEST, ...LEAF_SIGN], scratch =>
-    generate(scratch, config, [LEAF_REQUEST, sign]),
-  )
-  return {
-    ca: { ...caFiles, outcome: ca.outcome },
-    leaf: { ...files(leaf.path), outcome: leaf.outcome },
-  }
+  const ca = await issue(dir, 'ca', [], CA)
+  const fingerprint = new X509Certificate(await Bun.file(ca.certPath).text()).fingerprint256
+  const signer = files(join('..', basename(dirname(ca.certPath))))
+  const leaf = await issue(dir, 'leaf', [fingerprint], leafRecipe(hosts, signer))
+  return { ca, leaf }
 }

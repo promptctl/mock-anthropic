@@ -32,7 +32,12 @@ async function sans(certs: Certificates): Promise<string[]> {
 // NODE_EXTRA_CA_CERTS, and rejects with the client's error otherwise.
 async function handshake(certs: Certificates, host: string): Promise<void> {
   const [cert, key, ca] = await Promise.all([read(certs.leaf.certPath), read(certs.leaf.keyPath), read(certs.ca.certPath)])
-  const server = tls.createServer({ cert, key }, socket => socket.end())
+  // The client's verdict is the result. A client that refuses the leaf resets the connection, which
+  // the server's side sees as an error, so the server's side ignores it.
+  const server = tls.createServer({ cert, key }, socket => {
+    socket.on('error', () => {})
+    socket.end()
+  })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as { port: number }
   try {
