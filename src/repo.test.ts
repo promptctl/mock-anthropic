@@ -47,7 +47,17 @@ const ROOT_FILES = new Set([
 const DECLARED_KINDS = [/^src\/(?:[^/]+\/)*[^/]+\.ts$/, /^\.github\/workflows\/[^/]+\.yml$/]
 
 // The conventional homes of stored response bodies, so a body dressed as `.ts` still fails.
-const BODY_STORES = new Set(['fixtures', '__fixtures__', '__snapshots__', 'cassettes', 'recordings'])
+const BODY_STORES = new Set([
+  'fixtures',
+  '__fixtures__',
+  '__mocks__',
+  '__snapshots__',
+  'testdata',
+  'cassettes',
+  'recordings',
+  'captures',
+  'har',
+])
 
 // UUID-shaped in any case and inside any longer token; isSyntheticUuid decides which are ours.
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
@@ -90,17 +100,21 @@ function findLeaks(sources: readonly Source[]): string[] {
 // repository the hook runs in.
 const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')))
 
+// A repository is its root and the environment git reads it with, so the temp repos below are
+// scanned under the same machine-independent config they were built with.
+type Repo = { root: string; env: Record<string, string | undefined> }
+
 // [LAW:no-silent-failure] A git that fails throws with its stderr, so a broken listing can never
 // pass as a clean tree.
-async function git(root: string, args: string[], stdin: Uint8Array = new Uint8Array()): Promise<Buffer> {
-  const proc = Bun.spawn(['git', ...args], { cwd: root, env: gitEnv, stdin, stdout: 'pipe', stderr: 'pipe' })
+async function git({ root, env }: Repo, args: string[], stdin: Uint8Array = new Uint8Array()): Promise<Buffer> {
+  const proc = Bun.spawn(['git', ...args], { cwd: root, env, stdin, stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).arrayBuffer(),
     new Response(proc.stderr).text(),
     proc.exited,
   ])
   if (code !== 0) {
-    throw new Error(`git ${args.join(' ')} in ${root} exited ${code}: ${redact(stderr)}`)
+    throw new Error(redact(`git ${args.join(' ')} in ${root} exited ${code}: ${stderr}`))
   }
   return Buffer.from(stdout)
 }
@@ -112,18 +126,18 @@ function nulSeparated(output: Buffer): string[] {
 // The files on disk a commit would take: tracked or untracked-and-not-ignored, minus deletions not
 // yet committed. Read as git would record them: a symlink as its target, and a directory (a
 // nested repository, which `git add` records as a gitlink) as a path with no text.
-async function workingTreeSources(root: string): Promise<Source[]> {
+async function workingTreeSources(repo: Repo): Promise<Source[]> {
   const listed = nulSeparated(
-    await git(root, ['ls-files', '-z', '--deduplicate', '--cached', '--others', '--exclude-standard']),
+    await git(repo, ['ls-files', '-z', '--deduplicate', '--cached', '--others', '--exclude-standard']),
   )
-  const deleted = new Set(nulSeparated(await git(root, ['ls-files', '-z', '--deleted'])))
+  const deleted = new Set(nulSeparated(await git(repo, ['ls-files', '-z', '--deleted'])))
   const paths = listed.map(entry => entry.replace(/\/$/, '')).filter(path => !deleted.has(path))
   if (paths.length === 0) {
-    throw new Error(`git ls-files listed no files in ${root}: nothing was scanned`)
+    throw new Error(redact(`git ls-files listed no files in ${repo.root}: nothing was scanned`))
   }
   const sources = await Promise.all(
     paths.map(path =>
-      workingTreeFile(root, path).catch((error: unknown) => {
+      workingTreeFile(repo.root, path).catch((error: unknown) => {
         throw new Error(redact(String(error)), { cause: error })
       }),
     ),
@@ -170,22 +184,23 @@ function parseTreeEntry(entry: string): { object: string; path: string } {
 
 // Every object a push could send: what HEAD, a local branch or a tag reaches and origin's
 // remote-tracking refs do not. Only origin counts as published, so a commit that has reached a
-// private mirror alone is still scanned. In CI that is next to nothing, since the checkout is
-// what origin holds; in a clone with no origin it is all of history, which is what a first push
-// sends. Commits and annotated tags are scanned whole, messages included, and each commit's full
-// file list as paths, so a new name for content origin already holds is still checked. A blob is
-// scanned as text at its path and reported under a commit that carries it.
-async function unpushedSources(root: string): Promise<Source[]> {
+// private mirror alone is still scanned. A CI push build reads nothing here, since its checkout is
+// what origin holds; a CI pull-request build reads the one shallow merge commit it checks out,
+// whose tree is the PR's whole result; in a clone with no origin it is all of history, which is
+// what a first push sends. Commits and annotated tags are scanned whole, messages included, and
+// each commit's full file list as paths, so a new name for content origin already holds is still
+// checked. A blob is scanned as text at its path and reported under a commit that carries it.
+async function unpushedSources(repo: Repo): Promise<Source[]> {
   const refs = ['HEAD', '--branches', '--tags', '--not', '--remotes=origin']
-  const listed = await git(root, ['rev-list', '--objects', ...refs])
+  const listed = await git(repo, ['rev-list', '--objects', ...refs])
   const format = '--batch=%(objectname) %(objecttype) %(objectsize) %(rest)'
-  const objects = parseBatch(await git(root, ['cat-file', format], listed))
+  const objects = parseBatch(await git(repo, ['cat-file', format], listed))
   const commits = objects.filter(object => object.type === 'commit')
   const blobCommit = new Map<string, string>()
   const commitSources: Source[] = []
   for (const { name, text } of commits) {
     const origin = name.slice(0, 12)
-    const entries = nulSeparated(await git(root, ['ls-tree', '-r', '-z', name])).map(parseTreeEntry)
+    const entries = nulSeparated(await git(repo, ['ls-tree', '-r', '-z', name])).map(parseTreeEntry)
     for (const { object } of entries) blobCommit.set(object, origin)
     commitSources.push(
       { kind: 'text', origin, where: 'commit', text },
@@ -207,8 +222,8 @@ async function unpushedSources(root: string): Promise<Source[]> {
 
 // One path source per path, keeping the first origin, so a path every commit carries is
 // reported once.
-async function readSources(root: string): Promise<Source[]> {
-  const sources = (await Promise.all([workingTreeSources(root), unpushedSources(root)])).flat()
+async function readSources(repo: Repo): Promise<Source[]> {
+  const sources = (await Promise.all([workingTreeSources(repo), unpushedSources(repo)])).flat()
   const seenPaths = new Set<string>()
   return sources.filter(source => {
     if (source.kind === 'text') return true
@@ -219,7 +234,7 @@ async function readSources(root: string): Promise<Source[]> {
 }
 
 test('the tree and unpushed history hold no foreign UUIDs and no stored response bodies', async () => {
-  expect(findLeaks(await readSources(join(import.meta.dir, '..')))).toEqual([])
+  expect(findLeaks(await readSources({ root: join(import.meta.dir, '..'), env: gitEnv }))).toEqual([])
 })
 
 describe('findLeaks', () => {
@@ -247,11 +262,15 @@ describe('findLeaks', () => {
       [`o src/<foreign UUID>.ts:1: UUID not built by syntheticUuid`],
     ],
     [path('src/mcp/servers.json'), ['o src/mcp/servers.json: not a declared kind of repo file']],
-    [path('testdata/a.json'), ['o testdata/a.json: not a declared kind of repo file']],
+    [
+      path('testdata/a.json'),
+      ['o testdata/a.json: not a declared kind of repo file', 'o testdata/a.json: stored response bodies (testdata/)'],
+    ],
     [path('x.har.json'), ['o x.har.json: not a declared kind of repo file']],
     [path('fixture/a.json'), ['o fixture/a.json: not a declared kind of repo file']],
     [path('src/fixtures/a.ts'), ['o src/fixtures/a.ts: stored response bodies (fixtures/)']],
     [path('src/a/__snapshots__/b.ts'), ['o src/a/__snapshots__/b.ts: stored response bodies (__snapshots__/)']],
+    [path('src/__mocks__/messages.ts'), ['o src/__mocks__/messages.ts: stored response bodies (__mocks__/)']],
     [
       path('Fixtures/a.json'),
       ['o Fixtures/a.json: not a declared kind of repo file', 'o Fixtures/a.json: stored response bodies (Fixtures/)'],
@@ -280,7 +299,8 @@ const dir = await mkdtemp(join(tmpdir(), 'mock-anthropic-repo-'))
 afterAll(() => rm(dir, { recursive: true, force: true }))
 
 describe('readSources', () => {
-  // A git that ignores the machine's config, so commits here need no identity or signing setup.
+  // A git that ignores the machine's config, so commits here need no identity or signing setup and
+  // the scan's listing does not depend on a global excludesFile.
   const env = {
     ...gitEnv,
     GIT_CONFIG_GLOBAL: '/dev/null',
@@ -295,6 +315,7 @@ describe('readSources', () => {
     if (result.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr.toString()}`)
     return result.stdout.toString().trim()
   }
+  const scan = (root: string) => readSources({ root, env })
   async function repo(name: string): Promise<string> {
     const root = join(dir, name)
     await mkdir(join(root, 'src'), { recursive: true })
@@ -314,7 +335,7 @@ describe('readSources', () => {
     await Bun.write(join(root, 'ignored.ts'), foreign)
     await mkdir(join(root, 'nested'))
     run(join(root, 'nested'), 'init', '-q')
-    const sources = await readSources(root)
+    const sources = await scan(root)
     const paths = sources.flatMap(source => (source.kind === 'path' ? [source.path] : []))
     expect(paths.toSorted()).toEqual(['.gitignore', 'nested', 'src/keep.ts', 'src/untracked.ts'])
     expect(findLeaks(sources)).toEqual(['working tree nested: not a declared kind of repo file'])
@@ -331,24 +352,24 @@ describe('readSources', () => {
     const leaked = run(root, 'rev-parse', '--short=12', 'HEAD')
     run(root, 'rm', '-q', 'src/leak.ts')
     run(root, 'commit', '-q', '-m', 'unleak')
-    expect(findLeaks(await readSources(root))).toEqual([`${leaked} src/leak.ts:1: ${leak}`])
+    expect(findLeaks(await scan(root))).toEqual([`${leaked} src/leak.ts:1: ${leak}`])
   })
 
   test('finds a leak in a commit message', async () => {
     const root = await repo('message')
     run(root, 'commit', '-q', '--allow-empty', '-m', `about ${foreign}`)
     const commit = run(root, 'rev-parse', '--short=12', 'HEAD')
-    expect(findLeaks(await readSources(root))).toEqual([`${commit} commit:6: ${leak}`])
+    expect(findLeaks(await scan(root))).toEqual([`${commit} commit:6: ${leak}`])
   })
 
   test('reads only commits no remote has', async () => {
     const root = await repo('pushed')
     run(root, 'commit', '-q', '--allow-empty', '-m', `about ${foreign}`)
     run(root, 'update-ref', 'refs/remotes/origin/master', 'HEAD')
-    expect((await readSources(root)).filter(source => source.origin !== 'working tree')).toEqual([])
+    expect((await scan(root)).filter(source => source.origin !== 'working tree')).toEqual([])
     run(root, 'commit', '-q', '--allow-empty', '-m', 'after the push')
     const commit = run(root, 'rev-parse', '--short=12', 'HEAD')
-    const origins = new Set((await readSources(root)).map(source => source.origin))
+    const origins = new Set((await scan(root)).map(source => source.origin))
     expect(origins).toEqual(new Set(['working tree', commit]))
   })
 
@@ -362,7 +383,7 @@ describe('readSources', () => {
     run(root, 'checkout', '-q', 'master')
     run(root, 'tag', '-a', 'v0', '-m', `release ${foreign}`)
     const tag = run(root, 'rev-parse', '--short=12', 'v0')
-    expect(findLeaks(await readSources(root)).toSorted()).toEqual(
+    expect(findLeaks(await scan(root)).toSorted()).toEqual(
       [`${wip} commit:6: ${leak}`, `${tag} tag:6: ${leak}`].toSorted(),
     )
   })
