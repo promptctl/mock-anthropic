@@ -25,11 +25,19 @@ export class UsageError extends Error {
   override name = 'UsageError'
 }
 
-// [LAW:single-enforcer] The one parse of a command's flags: unknown flags and positionals are refused,
-// and every refusal of parseArgs's becomes a UsageError.
+// [LAW:single-enforcer] The one parse of a command's flags: unknown flags, positionals, and a flag that
+// takes one value given twice are refused, and every refusal of parseArgs's becomes a UsageError.
 export function parse<const O extends ParseArgsOptionsConfig>(args: readonly string[], options: O) {
+  const { values, tokens } = parseFlags(args, options)
+  for (const [name, option] of Object.entries(options)) {
+    if (option.multiple !== true && tokens.filter(token => token.kind === 'option' && token.name === name).length > 1) throw new UsageError(`--${name}: given more than once`)
+  }
+  return values
+}
+
+function parseFlags<const O extends ParseArgsOptionsConfig>(args: readonly string[], options: O) {
   try {
-    return parseArgs({ args: [...args], options, strict: true, allowPositionals: false }).values
+    return parseArgs({ args: [...args], options, strict: true, allowPositionals: false, tokens: true })
   } catch (error) {
     if (error instanceof TypeError && 'code' in error && String(error.code).startsWith('ERR_PARSE_ARGS_')) throw new UsageError(error.message)
     throw error
@@ -60,7 +68,8 @@ async function invoke(commands: Commands, argv: readonly string[]): Promise<Invo
   if (command === undefined) return { ending: usage(commands, name === undefined ? 'no command given' : `unknown command: ${name}`), abandoned: false }
   const lifetime = watch(command.kind)
   try {
-    const running = command.kind === 'task' ? command.run(args) : command.run(args, lifetime.ended)
+    // Promise.try: a run that throws before it returns a promise ends the same way as one that rejects.
+    const running = Promise.try(() => (command.kind === 'task' ? command.run(args) : command.run(args, lifetime.ended)))
     const settled = await Promise.race([
       running.then(
         result => ({ kind: 'returned', result }) as const,
@@ -90,11 +99,11 @@ function failed(why: readonly string[], facts: Facts): Ending {
   return { outcome: 'failed', why: why.join('\n'), facts }
 }
 
-// The first end asked the command to finish; a signal after it came while the command was ending, and
-// is what abandons a service.
+// The first end asked the command to finish; every end after it came while the command was ending (a
+// signal then is what abandons a service).
 function told(reason: EndReason, index: number): string {
-  if ('crash' in reason) return describe(reason.crash)
-  return `${reason.signal} ${index === 0 ? 'before the command finished' : 'while the command was ending'}`
+  const when = index === 0 ? 'before the command finished' : 'while the command was ending'
+  return 'signal' in reason ? `${reason.signal} ${when}` : `${when}: ${describe(reason.crash)}`
 }
 
 function usage(commands: Commands, why: string): Ending {
@@ -111,18 +120,12 @@ function usage(commands: Commands, why: string): Ending {
 // command.
 function watch(kind: Command['kind']) {
   const ends: EndReason[] = []
-  let end!: (reason: EndReason) => void
-  let force!: () => void
-  const ended = new Promise<EndReason>(resolve => {
-    end = resolve
-  })
-  const forced = new Promise<void>(resolve => {
-    force = resolve
-  })
+  const ended = Promise.withResolvers<EndReason>()
+  const forced = Promise.withResolvers<void>()
   const onEnd = (reason: EndReason) => {
     ends.push(reason)
-    end(reason)
-    if (kind === 'task' || ('signal' in reason && ends.length > 1)) force()
+    ended.resolve(reason)
+    if (kind === 'task' || ('signal' in reason && ends.length > 1)) forced.resolve()
   }
   const onInterrupt = () => onEnd({ signal: 'SIGINT' })
   const onTerminate = () => onEnd({ signal: 'SIGTERM' })
@@ -132,8 +135,8 @@ function watch(kind: Command['kind']) {
   process.on('uncaughtException', onCrash)
   process.on('unhandledRejection', onCrash)
   return {
-    ended,
-    forced,
+    ended: ended.promise,
+    forced: forced.promise,
     ends: ends as readonly EndReason[],
     close() {
       process.off('SIGINT', onInterrupt)

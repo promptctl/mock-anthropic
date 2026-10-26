@@ -179,6 +179,7 @@ describe('a wrong command line', () => {
     ['a missing scripts directory', ['serve', '--scenarios', '/nonexistent/scripts'], '/nonexistent/scripts'],
     ['an empty scripts directory path', ['serve', '--scenarios', ''], '--scenarios: an empty path'],
     ['an empty account file path', ['serve', '--account', ''], '--account: an empty path'],
+    ['a flag that takes one value, given twice', ['serve', '--port', '0', '--port', '1'], '--port: given more than once'],
   ]
   for (const [what, args, named] of cases) {
     test(`${what}: exit 2, a USAGE record naming the cause, nothing on stdout`, async () => {
@@ -200,10 +201,10 @@ describe('a wrong command line', () => {
 })
 
 // The dispatcher run on a table of one stand-in command, in a script of its own, so a command can do
-// what no real one should: raise an error outside its call chain, ignore a signal, or return a child's
-// exit code. `body` is the command's own; it can write `marker` to show it ran to its end, and call
-// `say(line)` so the test knows how far it got.
-async function dispatch(kind: 'task' | 'service', body: string) {
+// what no real one should: raise an error outside its call chain, ignore a signal, throw before it
+// returns a promise, or return a child's exit code. `run` is the command's own, as source; it can write
+// `marker` to show it ran to its end, and call `say(line)` so the test knows how far it got.
+async function dispatch(kind: 'task' | 'service', run: string) {
   const dir = await directory()
   const script = join(dir, 'main.ts')
   const marker = join(dir, 'cleaned-up')
@@ -213,7 +214,7 @@ async function dispatch(kind: 'task' | 'service', body: string) {
 const marker = ${JSON.stringify(marker)}
 const say = (line) => process.stdout.write(line + '\\n')
 const forever = new Promise(() => {})
-process.exitCode = await main({ stand_in: { kind: '${kind}', usage: '', run: async (args, ended) => { ${body} } } }, ['stand_in'])
+process.exitCode = await main({ stand_in: { kind: '${kind}', usage: '', run: ${run} } }, ['stand_in'])
 `,
   )
   const child = spawn([script])
@@ -226,6 +227,9 @@ process.exitCode = await main({ stand_in: { kind: '${kind}', usage: '', run: asy
   }
 }
 
+// An async run with `text` as its body.
+const body = (text: string) => `async (args, ended) => { ${text} }`
+
 describe('the dispatcher', () => {
   const crashes: [string, string, string][] = [
     ['an error reported with reportError, as a failing sink is', `setTimeout(() => reportError(new Error('the sink broke')), 10)`, 'the sink broke'],
@@ -236,10 +240,10 @@ describe('the dispatcher', () => {
       const result = await (
         await dispatch(
           'service',
-          `${raise}
+          body(`${raise}
 const reason = await ended
 await Bun.write(marker, 'yes')
-return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.signal } }`,
+return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.signal } }`),
         )
       ).finished()
       expect(result.exit).toBe(1)
@@ -250,7 +254,7 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
     })
 
     test(`${what} ends a task that is stuck, without waiting for it`, async () => {
-      const result = await (await dispatch('task', `${raise}\nawait forever`)).finished()
+      const result = await (await dispatch('task', body(`${raise}\nawait forever`))).finished()
       expect(result.exit).toBe(1)
       expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: {} })
       expect(result.record.why).toContain(message)
@@ -258,7 +262,7 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
   }
 
   test('a signal ends a task at once, with a FAILED record naming it', async () => {
-    const running = await dispatch('task', `say('running')\nawait forever`)
+    const running = await dispatch('task', body(`say('running')\nawait forever`))
     expect(await running.said()).toBe('running')
     running.signal('SIGTERM')
     const result = await running.finished()
@@ -267,7 +271,7 @@ return { outcome: 'ok', facts: { ended: 'crash' in reason ? 'crashed' : reason.s
   })
 
   test('a second signal ends a service that is still stopping, with its record', async () => {
-    const running = await dispatch('service', `say('running')\nawait ended\nsay('stopping')\nawait forever`)
+    const running = await dispatch('service', body(`say('running')\nawait ended\nsay('stopping')\nawait forever`))
     expect(await running.said()).toBe('running')
     running.signal('SIGINT')
     expect(await running.said()).toBe('stopping')
@@ -300,16 +304,23 @@ process.exitCode = await main({ stand_in: { kind: 'task', usage: '', run } }, ['
   })
 
   test("a child's exit code is the run's", async () => {
-    const result = await (await dispatch('task', `return { outcome: 'exited', code: 3, facts: { child: 'stand-in' } }`)).finished()
+    const result = await (await dispatch('task', body(`return { outcome: 'exited', code: 3, facts: { child: 'stand-in' } }`))).finished()
     expect(result.exit).toBe(3)
     expect(result.record).toMatchObject({ outcome: 'exited', code: 3, exit: 3, facts: { child: 'stand-in' } })
   })
 
   test('a command that throws: exit 1 and a FAILED record carrying the stack', async () => {
-    const result = await (await dispatch('task', `throw new Error('the command broke')`)).finished()
+    const result = await (await dispatch('task', body(`throw new Error('the command broke')`))).finished()
     expect(result.exit).toBe(1)
     expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: {} })
     expect(result.record.why).toContain('the command broke')
     expect(result.record.why).toContain('main.ts')
+  })
+
+  test('a command that throws before it returns a promise is recorded the same way', async () => {
+    const result = await (await dispatch('task', `() => { throw new Error('thrown at once') }`)).finished()
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', exit: 1, facts: {} })
+    expect(result.record.why).toContain('thrown at once')
   })
 })
