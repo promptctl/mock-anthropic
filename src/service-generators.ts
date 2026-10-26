@@ -1,7 +1,6 @@
 import type { accountGenerators, PlainRow } from './account-generators.ts'
 import { type Answer, answer, type Generators, type Json } from './dispatch.ts'
 import { parseCountTokensRequest } from './messages.ts'
-import { inputTokens } from './render.ts'
 
 // PROJECT.md "Every other in-scope endpoint": the answers that name no one. Feature flags, telemetry
 // intake, organization settings and policy, the MCP directories, the plugin marketplace pointer, the
@@ -27,7 +26,7 @@ export function serviceGenerators() {
     'messages-count-tokens': (_, request) => {
       const parsed = parseCountTokensRequest(request.body)
       if (parsed.kind === 'invalid') return { kind: 'declined', why: parsed.why, facts: {} }
-      const input_tokens = inputTokens(parsed.value)
+      const input_tokens = parsed.value.inputTokens
       // [LAW:nothing-unseen] The count given, for the record.
       return answer({ input_tokens }, { input_tokens })
     },

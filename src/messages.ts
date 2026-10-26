@@ -36,12 +36,17 @@ const System = z.union([z.string().transform(text => [text]), z.array(z.object({
 // token count request share, so the two endpoints refuse the same messages for the same reason.
 const RequestBase = z.object({ model: z.string().min(1), system: System.default([]), messages: z.array(Message).min(1) })
 
-// [LAW:one-source-of-truth] A request's input as sent, the one thing its input tokens are counted from:
-// the system prompt, messages and tools, and none of the fields that shape only the reply (`max_tokens`,
-// `stream`, `metadata`), so a token count and a Messages reply to the same conversation agree.
-const Input = z
+// Plausible, not counted: about four characters to a token, as English text runs.
+export function tokens(text: string): number {
+  return Math.ceil(text.length / 4)
+}
+
+// [LAW:one-source-of-truth] A request's input tokens, the one count both a token count answer and a
+// Messages reply's usage give: its system prompt, messages and tools as sent, and none of the fields
+// that shape only the reply (`max_tokens`, `stream`, `metadata`), so the two agree on one conversation.
+const InputTokens = z
   .object({ system: z.unknown().optional(), messages: z.unknown(), tools: z.unknown().optional() })
-  .transform(({ system, messages, tools }) => ({ input: JSON.stringify([system, messages, tools]) }))
+  .transform(({ system, messages, tools }) => ({ inputTokens: tokens(JSON.stringify([system, messages, tools])) }))
 
 // `max_tokens` is required and `stream` defaults to false, as the API has them.
 const MessagesBody = RequestBase.extend({ max_tokens: z.int().positive(), stream: z.boolean().default(false) })
@@ -55,7 +60,7 @@ const MessagesBody = RequestBase.extend({ max_tokens: z.int().positive(), stream
     }
     return { model: body.model, max_tokens: body.max_tokens, stream: body.stream, systemTexts: body.system, lastUserTexts: lastUser.content }
   })
-  .and(Input)
+  .and(InputTokens)
 
 declare const parsed: unique symbol
 
@@ -63,8 +68,8 @@ declare const parsed: unique symbol
 // runtime value, applied only by the parses below, so nothing else can pass for a parsed request.
 type Parsed = { readonly [parsed]: true }
 
-// `raw` is the body as sent, for matching anywhere in it; `input` is what its input tokens are counted
-// from; `lastUserTexts` are the texts of the last `user` message, the current turn, apart from the same
+// `raw` is the body as sent, for matching anywhere in it; `inputTokens` is what it counts as;
+// `lastUserTexts` are the texts of the last `user` message, the current turn, apart from the same
 // words earlier in the conversation; `systemTexts` are the system prompt's blocks; `max_tokens` is the
 // reply's budget; `model` and `stream` say what to answer as and how.
 export type MessagesRequest = Parsed & { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
@@ -76,12 +81,12 @@ export function parseMessagesRequest(raw: string): ParsedBody<MessagesRequest> {
 }
 
 // `POST /v1/messages/count_tokens`: the base alone. No script is matched against it, so it needs no
-// last user message; its `input` is counted as a Messages request's is.
-export type CountTokensRequest = Parsed & { readonly input: string }
+// last user message; its `inputTokens` are counted as a Messages request's are.
+export type CountTokensRequest = Parsed & { readonly inputTokens: number }
 
 export function parseCountTokensRequest(raw: string): ParsedBody<CountTokensRequest> {
-  const body = parseJsonBody(raw, RequestBase.and(Input), 'a token count request')
-  return body.kind === 'parsed' ? { kind: 'parsed', value: stamp({ input: body.value.input }) } : body
+  const body = parseJsonBody(raw, RequestBase.and(InputTokens), 'a token count request')
+  return body.kind === 'parsed' ? { kind: 'parsed', value: stamp({ inputTokens: body.value.inputTokens }) } : body
 }
 
 // The one place the brand is applied, to a value a parse above just produced.

@@ -10,12 +10,11 @@ import { serviceGenerators } from './service-generators.ts'
 // two declared inputs (PROJECT.md "Inputs"): the account, and the consumer's script directories in the
 // order given. [LAW:types-are-the-program] It has a generator for every in-scope row, or it does not
 // typecheck.
-export function mockGenerators(inputs: { readonly account: Account; readonly scenarioDirs: readonly string[] }): Generators<Row> {
-  const generators = {
+export function mockGenerators(inputs: { readonly account: Account; readonly scenarioDirs: readonly string[] }): Required<Generators<Row>> {
+  return {
     messages: messagesGenerator(inputs.scenarioDirs, BUILT_INS),
     ...accountGenerators(inputs.account),
     ...organizationGenerators(inputs.account),
     ...serviceGenerators(),
-  } satisfies Required<Generators<Row>>
-  return generators
+  }
 }

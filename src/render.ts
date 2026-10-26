@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { CountTokensRequest, MessagesRequest } from './messages.ts'
+import { type MessagesRequest, tokens } from './messages.ts'
 import type { MessageReply, Reply } from './scripts.ts'
 
 // PROJECT.md "Messages": a script's reply as the response the request asked for. A message reply is
@@ -93,23 +93,12 @@ function assistantMessage(reply: MessageReply, request: MessagesRequest): Assist
     stop_reason: reply.stop_reason,
     stop_sequence: null,
     usage: {
-      input_tokens: inputTokens(request),
+      input_tokens: request.inputTokens,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
       output_tokens: Math.max(1, content.reduce((sum, block) => sum + tokens(streamedText(block)), 0)),
     },
   }
-}
-
-// Plausible, not counted: about four characters to a token, as English text runs.
-function tokens(text: string): number {
-  return Math.ceil(text.length / 4)
-}
-
-// [LAW:one-source-of-truth] A request's input tokens, the one count both a Messages reply's usage and
-// a token count answer give, so the two agree on the same conversation.
-export function inputTokens(request: MessagesRequest | CountTokensRequest): number {
-  return tokens(request.input)
 }
 
 // A server-sent event of the Messages stream: its `type` is also its SSE event name.
