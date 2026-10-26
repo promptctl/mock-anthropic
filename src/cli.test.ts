@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_ACCOUNT, syntheticUuid } from './account.ts'
 import { ENDPOINT_TABLE } from './endpoints.ts'
 import type { Signal } from './log.ts'
-import { CONFIG_FILE, CREDENTIALS_FILE, keychainService } from './login.ts'
+import { CONFIG_FILE, CREDENTIALS_FILE, keychainService, LEGACY_CONFIG_FILE } from './login.ts'
 import { ACCESS_TOKEN, OAUTH_SCOPES, REFRESH_TOKEN, TOKEN_LIFETIME_SECONDS } from './oauth.ts'
 import { scriptDirectories, writeScript } from './testing.ts'
 
@@ -175,7 +175,8 @@ process.exitCode = await main(COMMANDS, ['serve', '--port', '0'])
 
 describe('login', () => {
   const read = async (dir: string, name: string) => ({ value: await Bun.file(join(dir, name)).json(), mode: (await stat(join(dir, name))).mode & 0o777 })
-  const keychain = process.platform === 'darwin' ? 'absent' : 'none'
+  // On darwin a fresh config dir has no keychain entry to remove; elsewhere there is no keychain.
+  const keychain = process.platform === 'darwin' ? 0 : null
 
   test('writes the credential, the account, onboarding and the trusted projects, and records them', async () => {
     const account = { ...DEFAULT_ACCOUNT, accountUuid: syntheticUuid(201), organizationName: 'Override Org', subscriptionType: 'team' }
@@ -197,7 +198,7 @@ describe('login', () => {
     expect(result.record).toMatchObject({
       outcome: 'ok',
       ended_by: null,
-      facts: { config_dir: configDir, account_file: accountFile, trusted: [real.trim()], files: { [CREDENTIALS_FILE]: 'created', [CONFIG_FILE]: 'created' }, keychain },
+      facts: { config_dir: configDir, account_file: accountFile, trusted: [real.trim()], files: { [CREDENTIALS_FILE]: 'created', [CONFIG_FILE]: 'created', [LEGACY_CONFIG_FILE]: 'absent' }, keychain_removed: keychain },
     })
 
     const credentials = await read(configDir, CREDENTIALS_FILE)
@@ -224,7 +225,7 @@ describe('login', () => {
     const configDir = join(await directory(), 'config')
     const result = await run('login', configDir)
     expect(result.exit).toBe(0)
-    expect(result.record).toMatchObject({ outcome: 'ok', facts: { account_file: null, trusted: [], keychain } })
+    expect(result.record).toMatchObject({ outcome: 'ok', facts: { account_file: null, trusted: [], keychain_removed: keychain } })
     expect((await read(configDir, CREDENTIALS_FILE)).value.claudeAiOauth.subscriptionType).toBe(DEFAULT_ACCOUNT.subscriptionType)
     const { accountUuid, emailAddress, organizationUuid, organizationName } = DEFAULT_ACCOUNT
     expect((await read(configDir, CONFIG_FILE)).value).toEqual({
@@ -241,10 +242,12 @@ describe('login', () => {
     await writeScript(configDir, CREDENTIALS_FILE, { claudeAiOauth: { accessToken: 'an earlier token' } })
     await chmod(join(configDir, CREDENTIALS_FILE), 0o644)
     await writeScript(configDir, 'settings.json', { kept: true })
+    // An older global config, which 2.1.289 reads in place of .claude.json while it is there.
+    await writeScript(configDir, LEGACY_CONFIG_FILE, { hasCompletedOnboarding: false })
 
     const result = await run('login', configDir)
     expect(result.exit).toBe(0)
-    expect(result.record).toMatchObject({ outcome: 'ok', facts: { files: { [CREDENTIALS_FILE]: 'replaced', [CONFIG_FILE]: 'replaced' } } })
+    expect(result.record).toMatchObject({ outcome: 'ok', facts: { files: { [CREDENTIALS_FILE]: 'replaced', [CONFIG_FILE]: 'replaced', [LEGACY_CONFIG_FILE]: 'removed' } } })
     const credentials = await read(configDir, CREDENTIALS_FILE)
     expect(credentials.mode).toBe(0o600)
     expect(credentials.value.claudeAiOauth.accessToken).toBe(ACCESS_TOKEN)
@@ -261,13 +264,48 @@ describe('login', () => {
     await Bun.$`security add-generic-password -a mock-anthropic-test -s ${service} -w ${'{"claudeAiOauth":{}}'}`.quiet()
     try {
       const first = await run('login', configDir)
-      expect(first.record).toMatchObject({ outcome: 'ok', facts: { keychain: 'removed' } })
+      expect(first.record).toMatchObject({ outcome: 'ok', facts: { keychain_removed: 1 } })
       expect((await entry()).exitCode).toBe(44)
       const second = await run('login', configDir)
-      expect(second.record).toMatchObject({ outcome: 'ok', facts: { keychain: 'absent' } })
+      expect(second.record).toMatchObject({ outcome: 'ok', facts: { keychain_removed: 0 } })
     } finally {
       await Bun.$`security delete-generic-password -s ${service}`.quiet().nothrow()
     }
+  })
+
+  test.if(process.platform === 'darwin')('a keychain it cannot clear fails the login, naming the exit and the reason', async () => {
+    const root = await directory()
+    // A `security` ahead of the real one on PATH, failing as a machine with no default keychain does.
+    await Bun.write(join(root, 'security'), '#!/bin/sh\necho "no default keychain" >&2\nexit 50\n')
+    await chmod(join(root, 'security'), 0o755)
+    const child = Bun.spawn(['bun', CLI, 'login', join(root, 'config')], {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}` },
+    })
+    children.add(child)
+    const result = await finished(child, new Response(child.stdout).text())
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', facts: {} })
+    expect(result.record.why).toContain('exit 50: no default keychain')
+  })
+
+  test('a file it cannot put in place fails the login and leaves no temporary file behind', async () => {
+    const configDir = await directory()
+    await mkdir(join(configDir, CONFIG_FILE))
+    const result = await run('login', configDir)
+    expect(result.exit).toBe(1)
+    expect(result.record).toMatchObject({ outcome: 'failed', facts: {} })
+    expect(await Array.fromAsync(new Bun.Glob('*.tmp').scan({ cwd: configDir, dot: true }))).toEqual([])
+  })
+
+  test('a config dir path that names a file: exit 2, naming it', async () => {
+    const file = await writeScript(await directory(), 'not-a-dir', 'text')
+    const result = await run('login', file)
+    expect(result.exit).toBe(2)
+    expect(result.record).toMatchObject({ outcome: 'usage', facts: {} })
+    expect(result.record.why).toContain(`<config-dir> ${file}: not a directory`)
   })
 })
 
