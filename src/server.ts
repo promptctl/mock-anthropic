@@ -3,7 +3,7 @@ import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type Certificates, ensureCertificates } from './certificates.ts'
-import { dispatch, errorResponse, type Generators, type Verdict } from './dispatch.ts'
+import { dispatch, errorResponse, type Facts, type Generators, type Verdict } from './dispatch.ts'
 import { API, type EndpointRow, type EndpointTable, resolveEndpoint, tableHosts } from './endpoints.ts'
 
 // PROJECT.md "How a program reaches it" and "Failure behavior": one listener on 127.0.0.1 that is
@@ -12,7 +12,9 @@ import { API, type EndpointRow, type EndpointTable, resolveEndpoint, tableHosts 
 
 // [LAW:nothing-unseen] One record per unit of work: each request and each connection, the plain ones,
 // the tunnels and the refused ones alike. A request's `tunnel` is the id of the tunnel that carried it, or null for one sent straight to the
-// port. `status` is null when the client left before a response existed.
+// port. `status` is null when the client left before a response existed. `facts` are what the
+// generator decided, nested so none can stand in for a field of the record's own; `{}` when no
+// generator answered, or it reported nothing.
 export type RequestEvent = {
   readonly event: 'request'
   readonly tunnel: number | null
@@ -23,6 +25,7 @@ export type RequestEvent = {
   readonly endpoint: string | null
   readonly status: number | null
   readonly duration_ms: number
+  readonly facts: Facts
 } & (Verdict | { readonly outcome: 'aborted'; readonly why: string })
 
 // A connection's `host` is the authority its requests are addressed to, and `port` the port its CONNECT
@@ -504,7 +507,7 @@ function serveRequest<R extends EndpointRow>(
   })
   const unlessAbandoned = <T>(work: Promise<T>) => Promise.race([work, abandoned])
   const aborted = ({ by }: Abandoned, before: string) => {
-    record({ ...base, status: null, duration_ms: elapsed(started), outcome: 'aborted', why: endedEarly(by, before) })
+    record({ ...base, status: null, duration_ms: elapsed(started), facts: {}, outcome: 'aborted', why: endedEarly(by, before) })
     // The client is gone, or the mock is stopping; nothing reads this.
     return new Response(null)
   }
@@ -521,14 +524,14 @@ function serveRequest<R extends EndpointRow>(
       void dispatching.then(late => quietly(late.response.body?.cancel(endedEarly(dispatched.by, NOT_READY))))
       return aborted(dispatched, NOT_READY)
     }
-    const { verdict, response } = dispatched
+    const { verdict, response, facts } = dispatched
     return observed(method === 'HEAD' ? headersOnly(response) : response, carrier.kill, abandoned, delivery => {
       const outcome = delivery.ended === 'complete' ? verdict : { outcome: delivery.ended, why: delivery.why }
-      record({ ...base, status: response.status, duration_ms: elapsed(started), ...outcome })
+      record({ ...base, status: response.status, duration_ms: elapsed(started), facts, ...outcome })
     })
   })().catch((error: unknown) => {
     const why = `the mock failed: ${error instanceof Error ? error.message : String(error)}`
-    record({ ...base, status: 500, duration_ms: elapsed(started), outcome: 'failed', why })
+    record({ ...base, status: 500, duration_ms: elapsed(started), facts: {}, outcome: 'failed', why })
     return errorResponse('FAILED', { method, url }, why)
   })
   return { response, recorded }

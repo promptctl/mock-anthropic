@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Generators } from './dispatch.ts'
+import type { Facts, Generators } from './dispatch.ts'
 import { API, buildEndpointTable } from './endpoints.ts'
 import { eventLine, type MockServer, type ServerEvent, startServer } from './server.ts'
 
@@ -24,6 +24,9 @@ const ROWS = [
 
 const TABLE = buildEndpointTable(ROWS)
 
+// What the stream generator reports deciding, which its record keeps however its body ends.
+const STREAM_FACTS = { script: 'stream.json', reply: { kind: 'stream' } }
+
 // What a test controls in a running server: when a streamed body may finish or a slow generator may
 // answer, whether a stream was cancelled, and when the slow generator began. Each server gets its own,
 // so no test waits on another's.
@@ -36,13 +39,13 @@ function generators(): { generators: Generators<(typeof ROWS)[number]>; controls
   const cancelled = new Promise<string>(resolve => (cancel = resolve))
   let began!: () => void
   const slowBegan = new Promise<void>(resolve => (began = resolve))
-  const respond = (body: string | ReadableStream<Uint8Array>) => ({ kind: 'response', response: new Response(body) }) as const
+  const respond = (body: string | ReadableStream<Uint8Array>, facts: Facts = {}) => ({ kind: 'response', response: new Response(body), facts }) as const
   return {
     controls: { release, cancelled, slowBegan },
     generators: {
       hello: (_, request) => respond(`hello ${request.url.hostname} ${request.body}`),
       'other-hello': (_, request) => respond(`hello ${request.url.hostname}`),
-      declines: () => ({ kind: 'declined', why: 'nothing matches' }),
+      declines: () => ({ kind: 'declined', why: 'nothing matches', facts: { tried: ['a'] } }),
       throws: () => {
         throw new Error('generator broke')
       },
@@ -57,6 +60,7 @@ function generators(): { generators: Generators<(typeof ROWS)[number]>; controls
             },
             cancel: reason => cancel(String(reason)),
           }),
+          STREAM_FACTS,
         ),
       // Answers only once released, with a body that records its cancel.
       slow: async () => {
@@ -68,7 +72,7 @@ function generators(): { generators: Generators<(typeof ROWS)[number]>; controls
       locked: () => {
         const response = new Response('taken')
         void response.body!.getReader()
-        return { kind: 'response', response }
+        return { kind: 'response', response, facts: {} }
       },
       // Fails on the read after its first chunk, as a generator that breaks partway would.
       broken: () => {
@@ -175,6 +179,8 @@ describe('through the proxy', () => {
       { event: 'request', host: OTHER, method: 'GET', path: '/hello', endpoint: 'other-hello', status: 200, outcome: 'served' },
     ])
     expect(served[0]?.tunnel).toBeNumber()
+    // A generator that reports nothing is recorded as reporting nothing, not as a record without facts.
+    expect(served[0]?.facts).toEqual({})
     await mock.server.stop()
     const tunnels = mock.lines.filter(line => line.startsWith('CLOSED ') && record(line).tunnel !== null).map(record)
     expect(tunnels.map(t => [t.host, t.port, t.requests]).toSorted()).toEqual([
@@ -193,13 +199,13 @@ describe('through the proxy', () => {
     expect(carried).toEqual([tunnels[0]?.tunnel, tunnels[0]?.tunnel])
   })
 
-  const unmatched: [string, string, string, string][] = [
-    ['no endpoint', 'GET', '/nowhere', 'no endpoint'],
-    ['an out-of-scope row', 'GET', '/refused', 'out of scope: a test reason'],
-    ['an in-scope row with no generator', 'GET', '/ungenerated', 'no generator'],
-    ['a generator that declines', 'GET', '/declines', 'nothing matches'],
+  const unmatched: [string, string, string, string, Facts][] = [
+    ['no endpoint', 'GET', '/nowhere', 'no endpoint', {}],
+    ['an out-of-scope row', 'GET', '/refused', 'out of scope: a test reason', {}],
+    ['an in-scope row with no generator', 'GET', '/ungenerated', 'no generator', {}],
+    ['a generator that declines', 'GET', '/declines', 'nothing matches', { tried: ['a'] }],
   ]
-  for (const [name, method, path, why] of unmatched) {
+  for (const [name, method, path, why, facts] of unmatched) {
     test(`${name} gets a 400 naming the request, and an UNMATCHED line`, async () => {
       const mock = await start()
       const response = await mock.proxied(`https://${API}${path}?x=1`, { method })
@@ -207,7 +213,7 @@ describe('through the proxy', () => {
       expect(((await response.json()) as { error: { message: string } }).error.message).toBe(
         `mock-anthropic UNMATCHED: ${method} ${API} ${path}: ${why}`,
       )
-      expect(record(await mock.line('UNMATCHED '))).toMatchObject({ host: API, method, path, query: '?x=1', status: 400, why })
+      expect(record(await mock.line('UNMATCHED '))).toEqual(expect.objectContaining({ host: API, method, path, query: '?x=1', status: 400, why, facts }))
       await mock.server.stop()
     })
   }
@@ -216,7 +222,7 @@ describe('through the proxy', () => {
     const mock = await start()
     const response = await mock.proxied(`https://${API}/throws`)
     expect(response.status).toBe(500)
-    expect(record(await mock.line('FAILED '))).toMatchObject({ endpoint: 'throws', status: 500, why: 'generator broke' })
+    expect(record(await mock.line('FAILED '))).toEqual(expect.objectContaining({ endpoint: 'throws', status: 500, why: 'generator broke', facts: {} }))
     await mock.server.stop()
   })
 
@@ -242,7 +248,7 @@ describe('streamed bodies', () => {
     mock.controls.release()
     expect(new TextDecoder().decode((await reader.read()).value)).toBe('two;')
     expect((await reader.read()).done).toBe(true)
-    expect(record(await mock.line('SERVED '))).toMatchObject({ endpoint: 'stream', outcome: 'served' })
+    expect(record(await mock.line('SERVED '))).toMatchObject({ endpoint: 'stream', outcome: 'served', facts: STREAM_FACTS })
     await mock.server.stop()
   })
 
@@ -262,7 +268,12 @@ describe('streamed bodies', () => {
     await reader.read()
     controller.abort()
     expect(await mock.controls.cancelled).toBe('client closed before the body finished')
-    expect(record(await mock.line('ABORTED '))).toMatchObject({ endpoint: 'stream', status: 200, why: 'client closed before the body finished' })
+    expect(record(await mock.line('ABORTED '))).toMatchObject({
+      endpoint: 'stream',
+      status: 200,
+      why: 'client closed before the body finished',
+      facts: STREAM_FACTS,
+    })
     await mock.server.stop()
     expect(requestLines(mock).map(line => line.split(' ')[0])).toEqual(['ABORTED'])
   })

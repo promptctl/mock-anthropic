@@ -12,9 +12,21 @@ export type MockRequest = {
   readonly body: string
 }
 
+export type Json = string | number | boolean | null | readonly Json[] | { readonly [key: string]: Json }
+
+// [LAW:nothing-unseen] What a generator decided on the way to its answer, for the request's record:
+// for a Messages request, the script that answered and what was rendered, or every script tried.
+// [LAW:composability] One JSON value whose fields each generator types for itself, so this seam names
+// no endpoint's concepts. `{}` is a generator that has nothing to report.
+export type Facts = { readonly [key: string]: Json }
+
 // A generator answers with a response, whose body may stream, or declines and says why: a Messages
-// request no script matches is the generator's to refuse, not the table's.
-export type Answer = { readonly kind: 'response'; readonly response: Response } | { readonly kind: 'declined'; readonly why: string }
+// request no script matches is the generator's to refuse, not the table's. Either way it says what
+// it decided.
+export type Answer = (
+  | { readonly kind: 'response'; readonly response: Response }
+  | { readonly kind: 'declined'; readonly why: string }
+) & { readonly facts: Facts }
 
 export type Generator<R extends EndpointRow> = (resolution: Resolution<R>, request: MockRequest) => Answer | Promise<Answer>
 
@@ -30,7 +42,9 @@ export type Verdict =
   | { readonly outcome: 'unmatched'; readonly why: string }
   | { readonly outcome: 'failed'; readonly why: string }
 
-export type Dispatched = { readonly verdict: Verdict; readonly response: Response }
+// The facts sit beside the verdict, not in it: they describe the answer, and stay true of it when its
+// body later fails or is abandoned and the record's outcome changes.
+export type Dispatched = { readonly verdict: Verdict; readonly response: Response; readonly facts: Facts }
 
 // [LAW:dataflow-not-control-flow] Every request gets one verdict and the response that verdict implies;
 // only the values differ. [LAW:one-source-of-truth] The resolution is the caller's, made once, so the
@@ -41,17 +55,20 @@ export async function dispatch<R extends EndpointRow>(
   request: MockRequest,
 ): Promise<Dispatched> {
   const decision = await decide(generators, resolution, request)
+  const { facts } = decision
   switch (decision.kind) {
     case 'response':
-      return { verdict: { outcome: 'served' }, response: decision.response }
+      return { verdict: { outcome: 'served' }, response: decision.response, facts }
     case 'declined':
-      return { verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse('UNMATCHED', request, decision.why) }
+      return { verdict: { outcome: 'unmatched', why: decision.why }, response: errorResponse('UNMATCHED', request, decision.why), facts }
     case 'failed':
-      return { verdict: { outcome: 'failed', why: decision.why }, response: errorResponse('FAILED', request, decision.why) }
+      return { verdict: { outcome: 'failed', why: decision.why }, response: errorResponse('FAILED', request, decision.why), facts }
   }
 }
 
-type Decision = Answer | { readonly kind: 'failed'; readonly why: string }
+// The table's refusals and a generator that throws decided nothing a generator reports.
+type Decision = Answer | { readonly kind: 'failed'; readonly why: string; readonly facts: Facts }
+const NO_FACTS: Facts = {}
 
 // The table's refusals are declines too: a request with no row, a row out of scope, and an in-scope
 // row with no generator all reach the client as the same 400, each with its own reason.
@@ -60,18 +77,18 @@ async function decide<R extends EndpointRow>(
   resolution: Resolution<R> | null,
   request: MockRequest,
 ): Promise<Decision> {
-  if (resolution === null) return { kind: 'declined', why: 'no endpoint' }
+  if (resolution === null) return { kind: 'declined', why: 'no endpoint', facts: NO_FACTS }
   const { endpoint } = resolution
-  if (endpoint.scope === 'out-of-scope') return { kind: 'declined', why: `out of scope: ${endpoint.reason}` }
+  if (endpoint.scope === 'out-of-scope') return { kind: 'declined', why: `out of scope: ${endpoint.reason}`, facts: NO_FACTS }
   // The key type and the row type are joined by Generators' mapping; indexing by a row's id reads the
   // generator for that row, which this cast is the one place to say.
   const generator = (generators as Partial<Record<string, Generator<R>>>)[endpoint.id]
-  if (generator === undefined) return { kind: 'declined', why: 'no generator' }
+  if (generator === undefined) return { kind: 'declined', why: 'no generator', facts: NO_FACTS }
   // [LAW:no-silent-failure] A generator that throws is the mock's own bug: a 500 that names it.
   try {
     return await generator(resolution, request)
   } catch (error) {
-    return { kind: 'failed', why: error instanceof Error ? error.message : String(error) }
+    return { kind: 'failed', why: error instanceof Error ? error.message : String(error), facts: NO_FACTS }
   }
 }
 

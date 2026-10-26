@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { type MessagesRequest, parseMessagesRequest } from './messages.ts'
 
+const MODEL = 'claude-sonnet-5-5'
+
 function parsed(body: unknown): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify(body))
   if (result.kind !== 'parsed') throw new Error(`expected a Messages request: ${result.why}`)
@@ -16,7 +18,7 @@ function invalid(raw: string): string {
 describe('parseMessagesRequest', () => {
   test('keeps the raw body and passes the fields Claude Code sends that nothing reads', () => {
     const body = {
-      model: 'claude-sonnet-5-5',
+      model: MODEL,
       max_tokens: 1024,
       stream: true,
       system: [{ type: 'text', text: 'You are Claude Code.' }],
@@ -27,10 +29,18 @@ describe('parseMessagesRequest', () => {
     const request = parsed(body)
     expect(request.raw).toBe(JSON.stringify(body))
     expect(request.lastUserTexts).toEqual(['hello'])
+    expect(request.model).toBe(MODEL)
+    expect(request.stream).toBe(true)
+  })
+
+  test('a request that does not ask for a stream is not one, as the API defaults it', () => {
+    expect(parsed({ model: MODEL, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
+    expect(parsed({ model: MODEL, stream: false, messages: [{ role: 'user', content: 'hi' }] }).stream).toBe(false)
   })
 
   test('the last user text is the last user message, not an earlier one or a later assistant turn', () => {
     const request = parsed({
+      model: MODEL,
       messages: [
         { role: 'user', content: 'first question' },
         { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
@@ -43,6 +53,7 @@ describe('parseMessagesRequest', () => {
 
   test('the texts of a message are its text blocks and its tool results, by block type', () => {
     const request = parsed({
+      model: MODEL,
       messages: [
         {
           role: 'user',
@@ -62,15 +73,18 @@ describe('parseMessagesRequest', () => {
   test('a body that is not a Messages request is invalid, with the reason', () => {
     expect(invalid('{not json')).toStartWith('body is not JSON: ')
     expect(invalid('[]')).toStartWith('body is not a Messages request: ')
-    expect(invalid(JSON.stringify({ model: 'm' }))).toContain('messages')
-    expect(invalid(JSON.stringify({ messages: [] }))).toContain('messages')
-    expect(invalid(JSON.stringify({ messages: [{ role: 'assistant', content: 'only me' }] }))).toContain('has no user message')
-    expect(invalid(JSON.stringify({ messages: [{ role: 'system', content: 'x' }] }))).toContain('role')
+    expect(invalid(JSON.stringify({ model: MODEL }))).toContain('messages')
+    expect(invalid(JSON.stringify({ model: MODEL, messages: [] }))).toContain('messages')
+    expect(invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'assistant', content: 'only me' }] }))).toContain('has no user message')
+    expect(invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'system', content: 'x' }] }))).toContain('role')
+    expect(invalid(JSON.stringify({ messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
+    expect(invalid(JSON.stringify({ model: '', messages: [{ role: 'user', content: 'x' }] }))).toContain('model')
+    expect(invalid(JSON.stringify({ model: MODEL, stream: 'yes', messages: [{ role: 'user', content: 'x' }] }))).toContain('stream')
   })
 
   test('a malformed block of a type it reads does not pass as some other block', () => {
-    invalid(JSON.stringify({ messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
-    invalid(JSON.stringify({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
-    invalid(JSON.stringify({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
+    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] }))
+    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'tool_result', content: 5 }] }] }))
+    invalid(JSON.stringify({ model: MODEL, messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text' }] }] }] }))
   })
 })
