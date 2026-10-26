@@ -1,5 +1,5 @@
 import { createHash, randomBytes, X509Certificate } from 'node:crypto'
-import { mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -18,11 +18,19 @@ export type Certificates = {
   readonly leaf: { readonly certPath: string; readonly keyPath: string; readonly outcome: Outcome }
 }
 
+
+// What each certificate is built from: openssl.cnf, then each command, run in the certificate's own
+// directory. The leaf's signing command also gets the CA and a serial, which are not part of its recipe.
+const KEY = 'rsa:2048'
 const DAYS = '3650'
+const CA_STEPS = [
+  ['req', '-x509', '-newkey', KEY, '-nodes', '-days', DAYS, '-config', 'openssl.cnf', '-extensions', 'ca', '-keyout', 'key.pem', '-out', 'cert.pem'],
+]
+const LEAF_REQUEST = ['req', '-new', '-newkey', KEY, '-nodes', '-config', 'openssl.cnf', '-keyout', 'key.pem', '-out', 'request.csr']
+const LEAF_SIGN = ['x509', '-req', '-in', 'request.csr', '-days', DAYS, '-extfile', 'openssl.cnf', '-extensions', 'leaf', '-out', 'cert.pem']
 
 // Config files, not `-addext` or `-copy_extensions`: LibreSSL, the openssl macOS ships, has neither.
-function caConfig(): string {
-  return `[req]
+const CA_CONFIG = `[req]
 distinguished_name = dn
 prompt = no
 [dn]
@@ -32,7 +40,6 @@ basicConstraints = critical, CA:true
 keyUsage = critical, keyCertSign, cRLSign
 subjectKeyIdentifier = hash
 `
-}
 
 function leafConfig(hosts: readonly string[]): string {
   return `[req]
@@ -67,15 +74,22 @@ async function exists(path: string): Promise<boolean> {
   )
 }
 
+export type Published = { readonly path: string; readonly outcome: Outcome }
+
 // [LAW:no-ambient-temporal-coupling] [LAW:one-type-per-behavior] The one way a certificate reaches
-// `dir`: built in a scratch directory, then renamed into place whole. So a published name is always
-// complete, and when two starts build the same name at once, the rename is what decides between
-// them: renaming onto a published, non-empty directory fails and leaves it untouched, and the loser
-// uses the winner's. The scratch directory is mkdtemp's 0700, which is what keeps the keys private:
-// LibreSSL writes them 0644.
-async function publish(dir: string, name: string, build: (scratch: string) => Promise<void>) {
-  const path = join(dir, name)
-  if (await exists(path)) return { path, outcome: 'reused' as const }
+// `dir`. Its name is `kind` and a digest of `recipe`, everything the build depends on, so a changed
+// recipe names a directory not yet built and nothing on disk is ever checked for staleness. It is
+// built in a scratch directory, then renamed into place whole, so a published name is always
+// complete; when two starts build one name at once, the rename decides between them: renaming onto a
+// published, non-empty directory fails and leaves it untouched, and the loser uses the winner's.
+export async function publish(
+  dir: string,
+  kind: string,
+  recipe: readonly string[],
+  build: (scratch: string) => Promise<void>,
+): Promise<Published> {
+  const path = join(dir, `${kind}-${createHash('sha256').update(recipe.join('\0')).digest('hex').slice(0, 16)}`)
+  if (await exists(path)) return { path, outcome: 'reused' }
   const scratch = await mkdtemp(join(dir, '.tmp-'))
   try {
     await build(scratch)
@@ -91,35 +105,26 @@ async function publish(dir: string, name: string, build: (scratch: string) => Pr
   }
 }
 
-// [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's name is
-// derived from the CA and the hosts, so a changed host set, or a replaced CA, names a leaf not yet
-// built, and no leaf on disk is ever checked for staleness.
+// One certificate and its key in `scratch`. The key is made owner-only here: LibreSSL writes it 0644,
+// and a copy of the directory made without its 0700 mode would otherwise publish the CA's key.
+async function generate(scratch: string, config: string, steps: readonly (readonly string[])[]): Promise<void> {
+  await Bun.write(join(scratch, 'openssl.cnf'), config)
+  for (const step of steps) await openssl(step, scratch)
+  await chmod(join(scratch, 'key.pem'), 0o600)
+}
+
+// [LAW:effects-at-boundaries] The CA, then a leaf for exactly `hosts` signed by it. The leaf's recipe
+// holds the CA's fingerprint, so a replaced CA gets a new leaf too.
 export async function ensureCertificates(dir: string, hosts: readonly string[]): Promise<Certificates> {
   await mkdir(dir, { recursive: true })
-  const ca = await publish(dir, 'ca', async scratch => {
-    await Bun.write(join(scratch, 'openssl.cnf'), caConfig())
-    await openssl(
-      ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem', '-out', 'cert.pem', '-days', DAYS,
-        '-config', 'openssl.cnf', '-extensions', 'ca'],
-      scratch,
-    )
-  })
+  const ca = await publish(dir, 'ca', [CA_CONFIG, ...CA_STEPS.flat()], scratch => generate(scratch, CA_CONFIG, CA_STEPS))
   const caCert = join(ca.path, 'cert.pem')
   const fingerprint = new X509Certificate(await Bun.file(caCert).text()).fingerprint256
-  const digest = createHash('sha256').update([fingerprint, ...hosts].join('\n')).digest('hex')
-  const leaf = await publish(dir, `leaf-${digest.slice(0, 16)}`, async scratch => {
-    await Bun.write(join(scratch, 'openssl.cnf'), leafConfig(hosts))
-    await openssl(
-      ['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem', '-out', 'request.csr', '-config', 'openssl.cnf'],
-      scratch,
-    )
-    await openssl(
-      ['x509', '-req', '-in', 'request.csr', '-CA', caCert, '-CAkey', join(ca.path, 'key.pem'),
-        '-set_serial', `0x${randomBytes(16).toString('hex')}`, '-days', DAYS,
-        '-extfile', 'openssl.cnf', '-extensions', 'leaf', '-out', 'cert.pem'],
-      scratch,
-    )
-  })
+  const config = leafConfig(hosts)
+  const sign = [...LEAF_SIGN, '-CA', caCert, '-CAkey', join(ca.path, 'key.pem'), '-set_serial', `0x${randomBytes(16).toString('hex')}`]
+  const leaf = await publish(dir, 'leaf', [fingerprint, config, ...LEAF_REQUEST, ...LEAF_SIGN], scratch =>
+    generate(scratch, config, [LEAF_REQUEST, sign]),
+  )
   return {
     ca: { certPath: caCert, outcome: ca.outcome },
     leaf: { certPath: join(leaf.path, 'cert.pem'), keyPath: join(leaf.path, 'key.pem'), outcome: leaf.outcome },

@@ -1,20 +1,18 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { X509Certificate } from 'node:crypto'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import tls from 'node:tls'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
-import { type Certificates, CERTS_DIR, ensureCertificates } from './certificates.ts'
+import { basename, dirname, join } from 'node:path'
+import { type Certificates, ensureCertificates, publish } from './certificates.ts'
 import { ENDPOINT_HOSTS } from './endpoints.ts'
 
 const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-certs-'))
 afterAll(() => rm(root, { recursive: true, force: true }))
 const fresh = () => mkdtemp(join(root, 'dir-'))
 
-async function run(argv: string[], cwd: string = root): Promise<{ code: number; output: string }> {
-  // A git hook running `bun test` exports GIT_DIR and the like, which would point git elsewhere.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')))
-  const proc = Bun.spawn(argv, { cwd, env, stdout: 'pipe', stderr: 'pipe' })
+async function run(argv: string[]): Promise<{ code: number; output: string }> {
+  const proc = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -97,10 +95,11 @@ describe('ensureCertificates', async () => {
     expect((await run(['openssl', 'verify', '-CAfile', changed.ca.certPath, changed.leaf.certPath])).code).toBe(0)
   })
 
-  test('the keys are readable by their owner alone', async () => {
-    for (const path of [join(dir, 'ca'), join(first.leaf.keyPath, '..')]) {
-      expect((await Bun.file(path).stat()).mode & 0o077).toBe(0)
-    }
+  test('the keys, and the directories holding them, are their owner\'s alone', async () => {
+    const caKey = join(first.ca.certPath, '..', 'key.pem')
+    const paths = [caKey, join(caKey, '..'), first.leaf.keyPath, join(first.leaf.keyPath, '..')]
+    const modes = await Promise.all(paths.map(async path => (await stat(path)).mode & 0o077))
+    expect(modes).toEqual([0, 0, 0, 0])
   })
 })
 
@@ -114,16 +113,37 @@ test('two starts at once in an empty dir agree on one CA and one leaf', async ()
   expect([a.leaf.outcome, b.leaf.outcome].toSorted()).toEqual(['generated', 'reused'])
   expect((await run(['openssl', 'verify', '-CAfile', a.ca.certPath, b.leaf.certPath])).code).toBe(0)
   // No scratch directory is left behind.
-  expect((await readdir(dir)).toSorted()).toEqual(['ca', relative(dir, join(a.leaf.certPath, '..'))])
+  const published = [a.ca.certPath, a.leaf.certPath].map(path => basename(dirname(path)))
+  expect((await readdir(dir)).toSorted()).toEqual(published.toSorted())
+})
+
+test('when two builds of one name overlap, the first rename publishes and the other uses it', async () => {
+  const dir = await fresh()
+  // Neither build finishes until both have started, so both have found the name unpublished.
+  const { promise: bothStarted, resolve } = Promise.withResolvers<void>()
+  let started = 0
+  const build = (text: string) => async (scratch: string) => {
+    if (++started === 2) resolve()
+    await bothStarted
+    await Bun.write(join(scratch, 'built-by'), text)
+  }
+  const [a, b] = await Promise.all([publish(dir, 'x', ['recipe'], build('a')), publish(dir, 'x', ['recipe'], build('b'))])
+  expect([a.outcome, b.outcome].toSorted()).toEqual(['generated', 'reused'])
+  expect(a.path).toBe(b.path)
+  expect(await read(join(a.path, 'built-by'))).toBe(a.outcome === 'generated' ? 'a' : 'b')
+  expect(await readdir(dir)).toEqual([basename(a.path)])
+})
+
+test('a different recipe publishes under a different name', async () => {
+  const dir = await fresh()
+  const build = async (scratch: string) => {
+    await Bun.write(join(scratch, 'f'), '')
+  }
+  const [a, b] = await Promise.all([publish(dir, 'x', ['one'], build), publish(dir, 'x', ['two'], build)])
+  expect(a.path).not.toBe(b.path)
 })
 
 test('a failing openssl fails the start and names its command', async () => {
   const dir = await fresh()
   await expect(ensureCertificates(dir, [])).rejects.toThrow(/openssl x509 -req .* exited/)
-})
-
-test('the default certificate directory is gitignored', async () => {
-  const repo = join(import.meta.dir, '..')
-  const probe = relative(repo, join(CERTS_DIR, 'ca', 'key.pem'))
-  expect(await run(['git', 'check-ignore', '--quiet', probe], repo)).toEqual({ code: 0, output: '' })
 })

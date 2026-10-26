@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import pkg from '../package.json' with { type: 'json' }
 import { isSyntheticUuid, syntheticUuid } from './account.ts'
+import { CERTS_DIR } from './certificates.ts'
 
 // PROJECT.md "Technology": zod is the only runtime dependency. Every package.json field that
 // makes an install of this package pull in another package counts, not only `dependencies`.
@@ -235,6 +236,13 @@ async function readSources(repo: Repo): Promise<Source[]> {
 
 test('the tree and unpushed history hold no foreign UUIDs and no stored response bodies', async () => {
   expect(findLeaks(await readSources({ root: join(import.meta.dir, '..'), env: gitEnv }))).toEqual([])
+})
+
+// The certificates and keys `serve` generates are the one thing written into the checkout at run
+// time; a push must never carry them.
+test('the default certificate directory is gitignored', async () => {
+  const root = join(import.meta.dir, '..')
+  await git({ root, env: gitEnv }, ['check-ignore', '--quiet', relative(root, join(CERTS_DIR, 'ca-x', 'key.pem'))])
 })
 
 describe('findLeaks', () => {
