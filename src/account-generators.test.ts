@@ -82,7 +82,7 @@ const ANSWERS: readonly { name: string; method: Method; url: string; body?: stri
       account: { uuid: ACCOUNT_UUID, email_address: 'override@mock-anthropic.invalid' },
       organization: { uuid: ORG_UUID, name: 'Override Organization' },
     },
-    facts: { ...IDENTITY, grant_type: 'refresh_token', mock_refresh_token: true },
+    facts: { ...IDENTITY, grant_type: 'refresh_token', refresh_token: 'mock' },
   },
   {
     name: 'CLI bootstrap',
@@ -166,7 +166,7 @@ describe('an organization-scoped path naming another organization', () => {
       const why = `organization ${OTHER} is not the account's organization ${ORG_UUID}`
       expect(verdict).toEqual({ outcome: 'unmatched', why })
       expect(response.status).toBe(400)
-      expect(facts).toEqual({ organization_requested: OTHER, organization_uuid: ORG_UUID })
+      expect(facts).toEqual({ ...IDENTITY, organization_requested: OTHER })
     })
   }
 })
@@ -178,7 +178,7 @@ describe('a token request that is not a refresh of the mock login', () => {
     const { verdict, response, facts } = await token(JSON.stringify({ grant_type: 'authorization_code', code: 'x' }))
     expect(response.status).toBe(400)
     expect(verdict).toEqual({ outcome: 'unmatched', why: 'grant_type authorization_code: the browser login flow is out of scope' })
-    expect(facts).toEqual({ grant_type: 'authorization_code', mock_refresh_token: false })
+    expect(facts).toEqual({ grant_type: 'authorization_code', refresh_token: 'none' })
   })
 
   // A real login that reached the mock would have its stored credential replaced by the mock's, so it
@@ -187,8 +187,16 @@ describe('a token request that is not a refresh of the mock login', () => {
     const { verdict, response, facts } = await token(JSON.stringify({ grant_type: 'refresh_token', refresh_token: 'a-real-refresh-token' }))
     expect(response.status).toBe(400)
     expect(verdict).toEqual({ outcome: 'unmatched', why: "the refresh token is not the mock's: a login the mock did not write reached it" })
-    expect(facts).toEqual({ grant_type: 'refresh_token', mock_refresh_token: false })
+    expect(facts).toEqual({ grant_type: 'refresh_token', refresh_token: 'other' })
     expect(await response.text()).not.toContain('a-real-refresh-token')
+  })
+
+  // A refresh with no token is a broken request, not a real login reaching the mock, and says so.
+  test('a refresh with no refresh token is declined as one', async () => {
+    const { verdict, response, facts } = await token(JSON.stringify({ grant_type: 'refresh_token' }))
+    expect(response.status).toBe(400)
+    expect(verdict).toEqual({ outcome: 'unmatched', why: 'a refresh_token grant with no refresh_token' })
+    expect(facts).toEqual({ grant_type: 'refresh_token', refresh_token: 'none' })
   })
 
   test('a body that is not JSON is declined, saying so', async () => {

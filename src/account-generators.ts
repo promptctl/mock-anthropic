@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Account } from './account.ts'
-import type { Answer, Facts, Generators, Json } from './dispatch.ts'
+import type { Answer, Facts, Generator, Generators, Json } from './dispatch.ts'
 import type { Row } from './endpoints.ts'
 import { parseJsonBody } from './json-body.ts'
 import { ACCESS_TOKEN, OAUTH_SCOPES, REFRESH_TOKEN, TOKEN_LIFETIME_SECONDS } from './oauth.ts'
@@ -35,7 +35,7 @@ function forOrganization(account: Account, org: string, body: Json): Answer {
     : {
         kind: 'declined',
         why: `organization ${org} is not the account's organization ${account.organizationUuid}`,
-        facts: { organization_requested: org, organization_uuid: account.organizationUuid },
+        facts: { ...identity(account), organization_requested: org },
       }
 }
 
@@ -53,24 +53,36 @@ export function organizationGenerators(account: Account): Generators<Organizatio
     // 2.1.289 asks for the next page while `has_more` is true.
     'organization-plugins': { plugins: [], has_more: false },
   }
-  const generators = Object.entries(bodies).map(([id, body]) => [
-    id,
-    ({ params }: { readonly params: { readonly org: string } }) => forOrganization(account, params.org, body),
-  ])
-  // Every key is an OrganizationRow id, and every such row has an `{org}` param, which
-  // Object.fromEntries cannot carry; this cast is the one place that says so.
+  const generators = Object.entries(bodies).map(([id, body]) => {
+    const generator: Generator<OrganizationRow> = ({ params }) => forOrganization(account, params.org, body)
+    return [id, generator]
+  })
+  // Every key is an OrganizationRow id, which Object.fromEntries cannot carry; this cast is the one
+  // place that says so. The generator itself is checked against every organization row's params.
   return Object.fromEntries(generators) as Generators<OrganizationRow>
 }
 
 // What a token request asks for, read loosely so that a refusal can say what was asked.
 const TokenRequest = z.object({ grant_type: z.string(), refresh_token: z.string().optional() })
 
+// Whose refresh token a request carried, never the token itself: a refused one may be a real login's.
+type RefreshTokenKind = 'mock' | 'other' | 'none'
+const refreshTokenKind = (token: string | undefined): RefreshTokenKind =>
+  token === undefined ? 'none' : token === REFRESH_TOKEN ? 'mock' : 'other'
+
 // A refresh of the login `login` writes is answered. Another grant is the browser login flow. Another
 // refresh token is a login the mock did not write: answering it would overwrite that login's stored
 // credential with the mock's.
-function refusal(grant_type: string, mockRefreshToken: boolean): string | null {
+function refusal(grant_type: string, token: RefreshTokenKind): string | null {
   if (grant_type !== 'refresh_token') return `grant_type ${grant_type}: the browser login flow is out of scope`
-  return mockRefreshToken ? null : "the refresh token is not the mock's: a login the mock did not write reached it"
+  switch (token) {
+    case 'mock':
+      return null
+    case 'other':
+      return "the refresh token is not the mock's: a login the mock did not write reached it"
+    case 'none':
+      return 'a refresh_token grant with no refresh_token'
+  }
 }
 
 // The rows answered here: neither an organization-scoped row nor Messages can be given a generator in
@@ -113,9 +125,9 @@ export function accountGenerators(account: Account) {
       const parsed = parseJsonBody(request.body, TokenRequest, 'an OAuth token request')
       if (parsed.kind === 'invalid') return { kind: 'declined', why: parsed.why, facts: {} }
       const { grant_type, refresh_token } = parsed.value
-      // [LAW:nothing-unseen] What was asked, never the token itself: a refused one may be a real login's.
-      const asked = { grant_type, mock_refresh_token: refresh_token === REFRESH_TOKEN }
-      const why = refusal(grant_type, asked.mock_refresh_token)
+      // [LAW:nothing-unseen] What was asked, for the record whether answered or refused.
+      const asked = { grant_type, refresh_token: refreshTokenKind(refresh_token) }
+      const why = refusal(grant_type, asked.refresh_token)
       if (why !== null) return { kind: 'declined', why, facts: asked }
       return answer(
         {
