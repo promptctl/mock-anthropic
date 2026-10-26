@@ -58,7 +58,7 @@ export const CLAUDE_CODE_2_1_289_ADDITIONS = [
   inScope('organization-plugins', API, 'GET', '/api/oauth/organizations/{org}/plugins/list-plugins'),
   inScope('datadog-logs', DATADOG_LOGS, 'POST', '/api/v2/logs'),
   inScope('datadog-error-tracking', DATADOG_BROWSER, 'POST', '/api/v2/logs'),
-]
+] as const
 
 const ROWS = [
   inScope('messages', API, 'POST', '/v1/messages'),

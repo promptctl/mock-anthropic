@@ -4,7 +4,9 @@ import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Facts, Generators } from './dispatch.ts'
-import { API, buildEndpointTable } from './endpoints.ts'
+import { DEFAULT_ACCOUNT } from './account.ts'
+import { API, buildEndpointTable, ENDPOINT_TABLE, tableHosts } from './endpoints.ts'
+import { mockGenerators } from './generators.ts'
 import { eventLine, type MockServer, type ServerEvent, startServer } from './server.ts'
 
 const OTHER = 'claude.ai'
@@ -470,6 +472,27 @@ describe('a plain connection that is not served', () => {
     await mock.server.stop()
   })
 })
+
+test('on the real endpoint table, a CONNECT to each of its hosts is established', async () => {
+  const generators = mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] })
+  const server = await startServer({ port: 0, table: ENDPOINT_TABLE, generators, certsDir, emit: () => {} })
+  const hosts = tableHosts(ENDPOINT_TABLE)
+  const replies = await Promise.all(hosts.map(host => connectReply(server.port, host)))
+  await server.stop()
+  expect(replies).toEqual(hosts.map(() => 'HTTP/1.1 200 Connection Established\r\n\r\n'))
+})
+
+// Sends a CONNECT to `host:443` and resolves with the first bytes the server answers, then hangs up.
+function connectReply(port: number, host: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => socket.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`))
+    socket.once('data', chunk => {
+      resolve(chunk.toString())
+      socket.destroy()
+    })
+    socket.once('error', reject)
+  })
+}
 
 describe('CONNECT refusals', () => {
   for (const target of [`user@${API}:443`, `${API}/x:443`, `${API}\\x:443`, `api%2eanthropic.com:443`]) {

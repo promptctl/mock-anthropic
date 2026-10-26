@@ -164,8 +164,9 @@ describe('resolveEndpoint over the endpoint table', () => {
 test("the endpoints PROJECT.md says 2.1.289 also calls are exactly the table's 2.1.289 additions", async () => {
   const doc = await Bun.file(join(import.meta.dir, '..', 'PROJECT.md')).text()
   const section = doc.split('\nClaude Code 2.1.289 also calls')[1]?.split('\n### ')[0] ?? ''
-  // A bullet that does not open with a `METHOD host/path` is kept whole, so it fails the match below.
-  const listed = [...section.matchAll(/^- (.*)$/gm)].map(([, bullet = '']) => /^`([A-Z]+ [^`]+)`/.exec(bullet)?.[1] ?? bullet)
+  // Every bullet, at any depth and with either marker. One that does not open with a `METHOD host/path`
+  // is kept whole, so it fails the match below.
+  const listed = [...section.matchAll(/^\s*[-*+] (.*)$/gm)].map(([, bullet = '']) => /^`([A-Z]+ [^`]+)`/.exec(bullet)?.[1] ?? bullet)
   const added = CLAUDE_CODE_2_1_289_ADDITIONS.map(e => `${e.method} ${e.host}${e.path}`)
   expect(listed.toSorted()).toEqual(added.toSorted())
 })
