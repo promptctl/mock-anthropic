@@ -24,12 +24,22 @@ const ToolResultBlock = z
 const Content = contentOf(z.union([TextBlock, ToolResultBlock, OtherBlock]))
 const Message = z.object({ role: z.enum(['user', 'assistant']), content: Content })
 
+// The system prompt is a string or a list of text blocks, the only block type the API admits there;
+// each block stays one text, so a prompt is recognized by how its own block opens.
+const System = z.union([z.string().transform(text => [text]), z.array(z.object({ type: z.literal(TEXT), text: z.string() }).transform(block => block.text))])
+
 // Claude Code sends many fields no part of the mock reads, and zod drops keys a schema does not name,
 // so here and in every block above only what is read is declared. A field that a generator reads is
-// added here, typed, so the body is still parsed once. `model` is required and `stream` defaults to
-// false, as the API has them.
+// added here, typed, so the body is still parsed once. `model` and `max_tokens` are required, `stream`
+// defaults to false, and `system` to none, as the API has them.
 const MessagesBody = z
-  .object({ model: z.string().min(1), stream: z.boolean().default(false), messages: z.array(Message).min(1) })
+  .object({
+    model: z.string().min(1),
+    max_tokens: z.int().positive(),
+    stream: z.boolean().default(false),
+    system: System.default([]),
+    messages: z.array(Message).min(1),
+  })
   .transform((body, ctx) => {
     // [LAW:parse-dont-validate] The last user message is a parsed fact: a body with none is not a
     // request a script can be matched against, so it fails here and never reaches one.
@@ -38,12 +48,13 @@ const MessagesBody = z
       ctx.addIssue({ code: 'custom', message: 'has no user message', path: ['messages'] })
       return z.NEVER
     }
-    return { model: body.model, stream: body.stream, lastUserTexts: lastUser.content }
+    return { model: body.model, max_tokens: body.max_tokens, stream: body.stream, systemTexts: body.system, lastUserTexts: lastUser.content }
   })
 
 // `raw` is the body as sent, for matching anywhere in it; `lastUserTexts` are the texts of the last
-// `user` message, the current turn, apart from the same words earlier in the conversation; `model`
-// and `stream` say what to answer as and how.
+// `user` message, the current turn, apart from the same words earlier in the conversation;
+// `systemTexts` are the system prompt's blocks; `max_tokens` is the reply's budget; `model` and
+// `stream` say what to answer as and how.
 export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
 
 // A body that is not a Messages request is the generator's to decline, with the reason.

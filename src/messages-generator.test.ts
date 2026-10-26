@@ -1,31 +1,15 @@
-import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { dispatch, type Generators, type MockRequest } from './dispatch.ts'
-import { API, ENDPOINT_TABLE, resolveEndpoint, type Row } from './endpoints.ts'
-import { messagesGenerator } from './messages-generator.ts'
 import type { Script } from './scripts.ts'
+import { scriptDirectories, sendMessages } from './testing.ts'
 
-const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-messages-'))
-afterAll(() => rm(root, { recursive: true, force: true }))
-
-let nextDir = 0
-async function directory(scripts: Record<string, unknown> = {}): Promise<string> {
-  const dir = join(root, String(nextDir++))
-  await mkdir(dir)
-  for (const [name, script] of Object.entries(scripts)) await Bun.write(join(dir, name), typeof script === 'string' ? script : JSON.stringify(script))
-  return dir
-}
+const { directory } = await scriptDirectories('messages')
 
 const MODEL = 'claude-sonnet-5-5'
 const body = (text: string, stream: boolean) => JSON.stringify({ model: MODEL, max_tokens: 1024, stream, messages: [{ role: 'user', content: text }] })
 
-// A Messages request through dispatch, resolved against the real endpoint table, as the server sends it.
 function send(dirs: readonly string[], text: string, { stream = false, builtIns = [] as readonly Script[], raw = body(text, stream) } = {}) {
-  const request: MockRequest = { method: 'POST', url: new URL(`https://${API}/v1/messages`), headers: new Headers(), body: raw }
-  const generators: Generators<Row> = { messages: messagesGenerator(dirs, builtIns) }
-  return dispatch(generators, resolveEndpoint(ENDPOINT_TABLE, request.method, request.url), request)
+  return sendMessages(raw, dirs, builtIns)
 }
 
 const SAYS_HELLO = { match: { lastUserContains: ['hello'] }, reply: { kind: 'message', content: [{ type: 'text', text: 'Hello!' }], stop_reason: 'end_turn' } }

@@ -60,9 +60,9 @@ A consumer supplies a directory of script files. Each file says which Messages r
 
 Claude Code makes some model calls beside a turn. The mock recognizes each one by its prompt and generates the answer, so a consumer never has to script them:
 
-- **Session title.** Both phrasings are covered: 2.1.283's "Generate a concise, sentence-case title" and 2.1.289's "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
-- **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is `<severity>N</severity>`, where a value below 50 allows the action. The default allows; a consumer can script a block.
-- **Quota probe.**
+- **Session title.** Both phrasings are covered: older builds' "Generate a concise, sentence-case title" and, from 2.1.283 on, "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
+- **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is in the format the prompt asks for: `<severity>N</severity>`, where a value below 50 allows the action; `<block>yes</block>` / `<block>no</block>`; or a `classify_result` tool call (2.1.88's default; its `tengu_auto_mode_config` flag's `twoStageClassifier` selects `<block>`, and 2.1.289 asks for a severity or `<block>` by the same flag). The default allows; a consumer can script a block.
+- **Quota probe.** A request for one token (`max_tokens: 1`) whose last user message is exactly `quota`. Claude Code reads only the rate-limit headers; the answer is a one-token message cut off at `max_tokens`.
 
 A consumer script that matches one of these requests takes precedence over the built-in answer.
 
