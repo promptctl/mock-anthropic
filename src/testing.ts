@@ -3,12 +3,11 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dispatch, type Dispatched, type Generators, type MockRequest } from './dispatch.ts'
-import { API, ENDPOINT_TABLE, resolveEndpoint, type Row } from './endpoints.ts'
+import { API, ENDPOINT_TABLE, type Method, resolveEndpoint, type Row } from './endpoints.ts'
 import { messagesGenerator } from './messages-generator.ts'
 import type { Script } from './scripts.ts'
 
-// What the tests share: consumer script directories, and a Messages request answered as the server
-// answers it.
+// What the tests share: consumer script directories, and a request answered as the server answers it.
 
 // A script is written as given when it is text, so a test can write one that is not JSON.
 export async function writeScript(dir: string, name: string, script: unknown): Promise<string> {
@@ -32,9 +31,12 @@ export async function scriptDirectories(name: string) {
   return { root, directory }
 }
 
-// A Messages request through dispatch, resolved against the real endpoint table, as the server sends it.
-export function sendMessages(raw: string, dirs: readonly string[], builtIns: readonly Script[]): Promise<Dispatched> {
-  const request: MockRequest = { method: 'POST', url: new URL(`https://${API}/v1/messages`), headers: new Headers(), body: raw }
-  const generators: Generators<Row> = { messages: messagesGenerator(dirs, builtIns) }
+// A request through dispatch, resolved against the real endpoint table, as the server sends it.
+export function send(generators: Generators<Row>, method: Method, url: string, body = ''): Promise<Dispatched> {
+  const request: MockRequest = { method, url: new URL(url), headers: new Headers(), body }
   return dispatch(generators, resolveEndpoint(ENDPOINT_TABLE, request.method, request.url), request)
+}
+
+export function sendMessages(raw: string, dirs: readonly string[], builtIns: readonly Script[]): Promise<Dispatched> {
+  return send({ messages: messagesGenerator(dirs, builtIns) }, 'POST', `https://${API}/v1/messages`, raw)
 }

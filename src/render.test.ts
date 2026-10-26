@@ -11,7 +11,7 @@ const MODEL = 'claude-sonnet-5-5'
 function request(text: string, stream: boolean): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify({ model: MODEL, max_tokens: 1024, stream, messages: [{ role: 'user', content: text }] }))
   if (result.kind !== 'parsed') throw new Error(result.why)
-  return result.request
+  return result.value
 }
 
 function message(content: MessageReply['content'], stop_reason: MessageReply['stop_reason'], eventDelayMs = 0): MessageReply {

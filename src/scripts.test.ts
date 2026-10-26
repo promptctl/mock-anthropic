@@ -10,7 +10,7 @@ const { root, directory } = await scriptDirectories('scripts')
 function request(...messages: { role: 'user' | 'assistant'; content: unknown }[]): MessagesRequest {
   const result = parseMessagesRequest(JSON.stringify({ model: 'claude-sonnet-5-5', max_tokens: 1024, messages }))
   if (result.kind !== 'parsed') throw new Error(result.why)
-  return result.request
+  return result.value
 }
 
 const HELLO = request({ role: 'user', content: 'hello' })

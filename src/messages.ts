@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { type ParsedBody, parseJsonBody } from './json-body.ts'
 
 // PROJECT.md "Messages": the one reading of a `POST /v1/messages` body. Every part of the mock that
 // answers a Messages request reads the body through this parse, never on its own.
@@ -58,17 +59,7 @@ const MessagesBody = z
 export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
 
 // A body that is not a Messages request is the generator's to decline, with the reason.
-export type ParsedMessages = { readonly kind: 'parsed'; readonly request: MessagesRequest } | { readonly kind: 'invalid'; readonly why: string }
-
-export function parseMessagesRequest(raw: string): ParsedMessages {
-  let value: unknown
-  try {
-    value = JSON.parse(raw)
-  } catch (error) {
-    return { kind: 'invalid', why: `body is not JSON: ${String(error)}` }
-  }
-  const result = MessagesBody.safeParse(value)
-  return result.success
-    ? { kind: 'parsed', request: { raw, ...result.data } }
-    : { kind: 'invalid', why: `body is not a Messages request: ${z.prettifyError(result.error)}` }
+export function parseMessagesRequest(raw: string): ParsedBody<MessagesRequest> {
+  const body = parseJsonBody(raw, MessagesBody, 'a Messages request')
+  return body.kind === 'parsed' ? { kind: 'parsed', value: { raw, ...body.value } } : body
 }
