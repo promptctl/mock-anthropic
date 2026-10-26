@@ -1,0 +1,70 @@
+import { z } from 'zod'
+
+// PROJECT.md "Inputs / The account": the identity the mock logs Claude Code in as. Every response
+// that carries identity is derived from one value of this type.
+
+// [LAW:one-source-of-truth] The one declaration of what a synthetic UUID looks like. The default
+// account, every test that needs another account, and the repo-safety scan all build or recognize
+// UUIDs through this prefix, so the scan's allowlist is this form and not a hand-kept list. A random
+// v4 UUID carries this all-zero prefix with probability about 2^-50.
+const SYNTHETIC_UUID_PREFIX = '00000000-0000-4000-8000-'
+const SYNTHETIC_UUID_DIGITS = 12
+const SYNTHETIC_UUID = new RegExp(`^${SYNTHETIC_UUID_PREFIX}[0-9a-f]{${SYNTHETIC_UUID_DIGITS}}$`)
+
+export function syntheticUuid(n: number): string {
+  if (!Number.isSafeInteger(n) || n < 0 || n >= 16 ** SYNTHETIC_UUID_DIGITS) {
+    throw new RangeError(`syntheticUuid: ${n} is not an integer in [0, 16^${SYNTHETIC_UUID_DIGITS})`)
+  }
+  return SYNTHETIC_UUID_PREFIX + n.toString(16).padStart(SYNTHETIC_UUID_DIGITS, '0')
+}
+
+export function isSyntheticUuid(text: string): boolean {
+  return SYNTHETIC_UUID.test(text)
+}
+
+// [LAW:domain-language] Field names are Claude Code's own: the `oauthAccount` block of its config
+// plus the credential's `subscriptionType`, so `login` and the generators copy them across unrenamed.
+// Strict, so a misspelled key in an override is rejected by name instead of ignored.
+export const AccountSchema = z.strictObject({
+  accountUuid: z.uuid(),
+  emailAddress: z.email(),
+  organizationUuid: z.uuid(),
+  organizationName: z.string().min(1),
+  subscriptionType: z.enum(['pro', 'max', 'team', 'enterprise']),
+})
+
+export type Account = z.infer<typeof AccountSchema>
+
+// [LAW:parse-dont-validate] [LAW:single-enforcer] The one checkpoint an account crosses. `origin`
+// says where the value came from, so the error names both the source and every bad field.
+export function parseAccount(value: unknown, origin: string): Account {
+  const result = AccountSchema.safeParse(value)
+  if (!result.success) {
+    throw new Error(`invalid account in ${origin}:\n${z.prettifyError(result.error)}`)
+  }
+  return result.data
+}
+
+export const DEFAULT_ACCOUNT: Account = parseAccount(
+  {
+    accountUuid: syntheticUuid(1),
+    emailAddress: 'user@mock-anthropic.invalid',
+    organizationUuid: syntheticUuid(2),
+    organizationName: 'Mock Organization',
+    subscriptionType: 'max',
+  },
+  'DEFAULT_ACCOUNT',
+)
+
+// [LAW:effects-at-boundaries] The consumer override: a JSON file holding a complete account, which
+// replaces the default whole. serve, login, and run all resolve `--account FILE` through this.
+export async function readAccountFile(path: string): Promise<Account> {
+  const text = await Bun.file(path).text()
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`invalid account in ${path}: not JSON: ${(error as Error).message}`, { cause: error })
+  }
+  return parseAccount(value, path)
+}
