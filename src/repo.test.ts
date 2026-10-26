@@ -85,17 +85,22 @@ function findLeaks(sources: readonly Source[]): string[] {
   return sources.flatMap(source => (source.kind === 'path' ? pathLeaks(source) : textLeaks(source)))
 }
 
+// `root` alone decides which repository git reads: a git hook running `bun test` exports GIT_DIR,
+// GIT_INDEX_FILE and the like, which would point every call, the temp repos' included, at the
+// repository the hook runs in.
+const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')))
+
 // [LAW:no-silent-failure] A git that fails throws with its stderr, so a broken listing can never
 // pass as a clean tree.
 async function git(root: string, args: string[], stdin: Uint8Array = new Uint8Array()): Promise<Buffer> {
-  const proc = Bun.spawn(['git', ...args], { cwd: root, stdin, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn(['git', ...args], { cwd: root, env: gitEnv, stdin, stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).arrayBuffer(),
     new Response(proc.stderr).text(),
     proc.exited,
   ])
   if (code !== 0) {
-    throw new Error(`git ${args.join(' ')} in ${root} exited ${code}: ${stderr}`)
+    throw new Error(`git ${args.join(' ')} in ${root} exited ${code}: ${redact(stderr)}`)
   }
   return Buffer.from(stdout)
 }
@@ -116,17 +121,24 @@ async function workingTreeSources(root: string): Promise<Source[]> {
   if (paths.length === 0) {
     throw new Error(`git ls-files listed no files in ${root}: nothing was scanned`)
   }
+  const sources = await Promise.all(
+    paths.map(path =>
+      workingTreeFile(root, path).catch((error: unknown) => {
+        throw new Error(redact(String(error)), { cause: error })
+      }),
+    ),
+  )
+  return sources.flat()
+}
+
+async function workingTreeFile(root: string, path: string): Promise<Source[]> {
   const origin = 'working tree'
-  return Promise.all(
-    paths.map(async (path): Promise<Source[]> => {
-      const file = join(root, path)
-      const stat = await lstat(file)
-      const pathSource: Source = { kind: 'path', origin, path }
-      if (stat.isDirectory()) return [pathSource]
-      const text = stat.isSymbolicLink() ? await readlink(file) : await readFile(file, 'utf8')
-      return [pathSource, { kind: 'text', origin, where: path, text }]
-    }),
-  ).then(sources => sources.flat())
+  const file = join(root, path)
+  const stat = await lstat(file)
+  const pathSource: Source = { kind: 'path', origin, path }
+  if (stat.isDirectory()) return [pathSource]
+  const text = stat.isSymbolicLink() ? await readlink(file) : await readFile(file, 'utf8')
+  return [pathSource, { kind: 'text', origin, where: path, text }]
 }
 
 type GitObject = { name: string; type: string; rest: string; text: string }
@@ -156,13 +168,16 @@ function parseTreeEntry(entry: string): { object: string; path: string } {
   return { object: match[1] ?? '', path: match[2] ?? '' }
 }
 
-// Every object a push would send: what HEAD reaches and no remote-tracking ref does. In CI that is
-// nothing, since the checked-out ref is remote-tracking; in a clone with no remote it is all of
-// history, which is what a first push sends. Commits are scanned whole, message included, and
-// each commit's full file list as paths, so a new name for content a remote already holds is still
-// checked. A blob is scanned as text at its path and reported under a commit that carries it.
+// Every object a push could send: what HEAD, a local branch or a tag reaches and origin's
+// remote-tracking refs do not. Only origin counts as published, so a commit that has reached a
+// private mirror alone is still scanned. In CI that is next to nothing, since the checkout is
+// what origin holds; in a clone with no origin it is all of history, which is what a first push
+// sends. Commits and annotated tags are scanned whole, messages included, and each commit's full
+// file list as paths, so a new name for content origin already holds is still checked. A blob is
+// scanned as text at its path and reported under a commit that carries it.
 async function unpushedSources(root: string): Promise<Source[]> {
-  const listed = await git(root, ['rev-list', '--objects', 'HEAD', '--not', '--remotes'])
+  const refs = ['HEAD', '--branches', '--tags', '--not', '--remotes=origin']
+  const listed = await git(root, ['rev-list', '--objects', ...refs])
   const format = '--batch=%(objectname) %(objecttype) %(objectsize) %(rest)'
   const objects = parseBatch(await git(root, ['cat-file', format], listed))
   const commits = objects.filter(object => object.type === 'commit')
@@ -181,16 +196,19 @@ async function unpushedSources(root: string): Promise<Source[]> {
     .filter(object => object.type === 'blob')
     .map(({ name, rest, text }): Source => {
       const origin = blobCommit.get(name)
-      if (origin === undefined) throw new Error(`blob ${name} at ${rest} is in no unpushed commit's tree`)
+      if (origin === undefined) throw new Error(`blob ${name} at ${redact(rest)} is in no unpushed commit's tree`)
       return { kind: 'text', origin, where: rest, text }
     })
-  return [...commitSources, ...blobSources]
+  const tagSources = objects
+    .filter(object => object.type === 'tag')
+    .map(({ name, text }): Source => ({ kind: 'text', origin: name.slice(0, 12), where: 'tag', text }))
+  return [...commitSources, ...blobSources, ...tagSources]
 }
 
 // One path source per path, keeping the first origin, so a path every commit carries is
 // reported once.
 async function readSources(root: string): Promise<Source[]> {
-  const sources = [...(await workingTreeSources(root)), ...(await unpushedSources(root))]
+  const sources = (await Promise.all([workingTreeSources(root), unpushedSources(root)])).flat()
   const seenPaths = new Set<string>()
   return sources.filter(source => {
     if (source.kind === 'text') return true
@@ -264,7 +282,7 @@ afterAll(() => rm(dir, { recursive: true, force: true }))
 describe('readSources', () => {
   // A git that ignores the machine's config, so commits here need no identity or signing setup.
   const env = {
-    ...process.env,
+    ...gitEnv,
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 'mock',
@@ -332,5 +350,20 @@ describe('readSources', () => {
     const commit = run(root, 'rev-parse', '--short=12', 'HEAD')
     const origins = new Set((await readSources(root)).map(source => source.origin))
     expect(origins).toEqual(new Set(['working tree', commit]))
+  })
+
+  test('reads unpushed commits on other branches, tag messages, and commits only a mirror has', async () => {
+    const root = await repo('refs')
+    run(root, 'update-ref', 'refs/remotes/origin/master', 'HEAD')
+    run(root, 'checkout', '-q', '-b', 'wip')
+    run(root, 'commit', '-q', '--allow-empty', '-m', `wip ${foreign}`)
+    const wip = run(root, 'rev-parse', '--short=12', 'HEAD')
+    run(root, 'update-ref', 'refs/remotes/mirror/wip', 'HEAD')
+    run(root, 'checkout', '-q', 'master')
+    run(root, 'tag', '-a', 'v0', '-m', `release ${foreign}`)
+    const tag = run(root, 'rev-parse', '--short=12', 'v0')
+    expect(findLeaks(await readSources(root)).toSorted()).toEqual(
+      [`${wip} commit:6: ${leak}`, `${tag} tag:6: ${leak}`].toSorted(),
+    )
   })
 })
