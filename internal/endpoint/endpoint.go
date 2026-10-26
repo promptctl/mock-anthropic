@@ -24,9 +24,8 @@ type Row struct {
 	host   string
 	method string
 	path   string
-	// reason is empty exactly when the row is in scope; Build refuses a blank out-of-scope reason.
-	reason     string
-	outOfScope bool
+	// reason is nil exactly when the row is in scope; build refuses a blank out-of-scope reason.
+	reason *string
 }
 
 func inScope(id ID, host, method, path string) Row {
@@ -34,17 +33,22 @@ func inScope(id ID, host, method, path string) Row {
 }
 
 func outOfScope(id ID, host, method, path, reason string) Row {
-	return Row{id: id, host: host, method: method, path: path, reason: reason, outOfScope: true}
+	return Row{id: id, host: host, method: method, path: path, reason: &reason}
 }
 
 func (r Row) ID() ID         { return r.id }
 func (r Row) Host() string   { return r.host }
 func (r Row) Method() string { return r.method }
 func (r Row) Path() string   { return r.path }
-func (r Row) InScope() bool  { return !r.outOfScope }
+func (r Row) InScope() bool  { return r.reason == nil }
 
 // OutOfScopeReason is why the row is refused, and false when it is in scope.
-func (r Row) OutOfScopeReason() (string, bool) { return r.reason, r.outOfScope }
+func (r Row) OutOfScopeReason() (string, bool) {
+	if r.reason == nil {
+		return "", false
+	}
+	return *r.reason, true
+}
 
 // segment is one segment of a path template. A literal matches its text exactly. A param matches any
 // one segment that starts with prefix, ends with suffix, and has at least one character between them:
@@ -108,8 +112,9 @@ func mustBuild(rows []Row) *Table {
 
 var (
 	paramSegment = regexp.MustCompile(`^([^{}]*)\{([a-z_]+)\}([^{}]*)$`)
-	// A lowercase DNS name of two or more labels: what a request's Hostname() can equal.
-	hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	// A lowercase DNS name of two or more labels whose top-level label starts with a letter, so no IP
+	// literal: what a request's Hostname() can equal and a leaf certificate can carry as a DNS SAN.
+	hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]([a-z0-9-]*[a-z0-9])?$`)
 	methods  = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 )
 
@@ -162,7 +167,7 @@ func parseEndpoint(row Row) (Endpoint, error) {
 	if !slices.Contains(methods, row.method) {
 		return fail("method %q is not one of %v", row.method, methods)
 	}
-	if row.outOfScope && strings.TrimSpace(row.reason) == "" {
+	if row.reason != nil && strings.TrimSpace(*row.reason) == "" {
 		return fail("an out-of-scope row needs a reason")
 	}
 	rest, ok := strings.CutPrefix(row.path, "/")
@@ -199,9 +204,10 @@ func parseSegment(text string) (segment, error) {
 		}
 		s = segment{param: true, prefix: m[1], name: m[2], suffix: m[3]}
 	}
-	// A request segment is matched decoded and dot-normalized, and a client's URL parser drops or
-	// rewrites control characters and backslashes, so fixed text holding a delimiter, an escape, one
-	// of those, or a dot segment is never what a request for it is matched as. A param stands for at least one
+	// A request segment is matched decoded and dot-normalized, and a WHATWG URL parser drops tab, LF
+	// and CR and turns a backslash into a slash, so fixed text holding a delimiter, an escape, one of
+	// those, or a dot segment is never what a request for it is matched as. Other control characters
+	// would survive, but no endpoint Claude Code calls names one, so they are refused with the rest. A param stands for at least one
 	// character, so `x` stands in for it here.
 	sample := s.text
 	if s.param {
@@ -239,13 +245,14 @@ type Resolution struct {
 	Params   map[string]string
 }
 
-// Resolve finds the endpoint a request is addressed to: its method, its host as the Host header
-// carries it (any case, any port; a server request's URL has no host inside a tunnel), and its
+// Resolve finds the endpoint a request is addressed to: its method, the host it is addressed to (any
+// case, any port, a trailing root dot; inside a tunnel that is the Host header, since a server
+// request's URL has no host there, and for a plain-origin request it is API), and its
 // escaped path. Each path segment is percent-decoded, then dot segments are removed as a WHATWG URL
 // parser removes them, before it is matched. False when no endpoint matches, including when a
 // segment's escapes do not decode to UTF-8.
 func (t *Table) Resolve(method, host, escapedPath string) (Resolution, bool) {
-	host = strings.ToLower((&url.URL{Host: host}).Hostname())
+	host = strings.TrimSuffix(strings.ToLower((&url.URL{Host: host}).Hostname()), ".")
 	rest, ok := strings.CutPrefix(escapedPath, "/")
 	if !ok {
 		return Resolution{}, false

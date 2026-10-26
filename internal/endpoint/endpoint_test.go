@@ -131,6 +131,7 @@ func TestRequestFormsThatDoNotChangeTheRow(t *testing.T) {
 		"https://api.anthropic.com/v1/%6Dessages",
 		"https://API.Anthropic.com:443/v1/messages?beta=true",
 		"https://api.anthropic.com/v1/./messages",
+		"https://api.anthropic.com.:443/v1/messages",
 		"https://api.anthropic.com/v1/x/../messages",
 	} {
 		if r, ok := resolve(t, "POST", raw); !ok || r.Endpoint.ID() != "messages" {
@@ -165,6 +166,7 @@ func TestBuildRejects(t *testing.T) {
 		"a host with capitals":                          {[]Row{inScope("a", "API.anthropic.com", "GET", "/x")}, `host "API.anthropic.com" is not`},
 		"a host with a port":                            {[]Row{inScope("a", hostAPI+":443", "GET", "/x")}, `host "api.anthropic.com:443" is not`},
 		"a host with a trailing dot":                    {[]Row{inScope("a", hostAPI+".", "GET", "/x")}, `host "api.anthropic.com." is not`},
+		"an IP literal host":                            {[]Row{inScope("a", "127.0.0.1", "GET", "/x")}, `host "127.0.0.1" is not`},
 		"a host with a space":                           {[]Row{inScope("a", "claude .ai", "GET", "/x")}, `host "claude .ai" is not`},
 		"a literal with a backslash":                    {[]Row{get("a", `/x\y`)}, `is not what a request`},
 		"a literal with a tab":                          {[]Row{get("a", "/x\ty")}, `is not what a request`},
