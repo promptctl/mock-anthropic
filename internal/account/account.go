@@ -42,12 +42,13 @@ func IsSyntheticUUID(s string) bool { return syntheticForm.MatchString(s) }
 // version or variant. Wider than uuidForm on purpose; a scan must not miss what a parser refuses.
 var uuidShape = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
-// ForeignUUIDs returns every UUID-shaped string in data that IsSyntheticUUID does not recognize.
-func ForeignUUIDs(data []byte) []string {
-	var foreign []string
-	for _, m := range uuidShape.FindAll(data, -1) {
-		if !IsSyntheticUUID(string(m)) {
-			foreign = append(foreign, string(m))
+// ForeignUUIDs returns the byte offset of every UUID-shaped string in data that IsSyntheticUUID does
+// not recognize. Offsets, not values: a caller reporting a hit must not copy a real identifier onward.
+func ForeignUUIDs(data []byte) []int {
+	var foreign []int
+	for _, m := range uuidShape.FindAllIndex(data, -1) {
+		if !IsSyntheticUUID(string(data[m[0]:m[1]])) {
+			foreign = append(foreign, m[0])
 		}
 	}
 	return foreign

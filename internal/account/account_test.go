@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -211,13 +212,13 @@ func TestForeignUUIDsFindsEveryOtherUUIDShape(t *testing.T) {
 	otherVersion := strings.Replace(synthetic, "-4000-", "-1000-", 1)
 	upper := strings.ToUpper(SyntheticUUID(0xabc))
 	embedded := "f" + synthetic[1:]
-	data := []byte(synthetic + " " + otherVersion + "\n\"" + upper + "\" id=" + embedded + "x")
-	got := ForeignUUIDs(data)
-	want := []string{otherVersion, upper, embedded}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("ForeignUUIDs = %q, want %q", got, want)
+	data := synthetic + " " + otherVersion + "\n\"" + upper + "\" id=" + embedded + "x"
+	got := ForeignUUIDs([]byte(data))
+	want := []int{strings.Index(data, otherVersion), strings.Index(data, upper), strings.Index(data, embedded)}
+	if !slices.Equal(got, want) {
+		t.Errorf("ForeignUUIDs = %v, want %v", got, want)
 	}
 	if got := ForeignUUIDs([]byte(synthetic + SyntheticUUID(1))); got != nil {
-		t.Errorf("synthetic UUIDs reported as foreign: %q", got)
+		t.Errorf("synthetic UUIDs reported as foreign at %v", got)
 	}
 }
