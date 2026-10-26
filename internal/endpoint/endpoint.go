@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -91,13 +92,14 @@ type Endpoint struct {
 // can be added or changed after the check.
 type Table struct {
 	endpoints []Endpoint
+	hosts     []string
 }
 
 // Default is the mock's endpoint table.
 var Default = mustBuild(rows)
 
 func mustBuild(rows []Row) *Table {
-	t, err := Build(rows)
+	t, err := build(rows)
 	if err != nil {
 		panic(err)
 	}
@@ -106,12 +108,14 @@ func mustBuild(rows []Row) *Table {
 
 var (
 	paramSegment = regexp.MustCompile(`^([^{}]*)\{([a-z_]+)\}([^{}]*)$`)
-	methods      = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
+	// A lowercase DNS name of two or more labels: what a request's Hostname() can equal.
+	hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	methods  = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 )
 
 // [LAW:single-enforcer] The one checkpoint a table passes: every row parses, every id is unique, and
 // no request can match two rows, which is what lets Resolve return the first match it finds.
-func Build(rows []Row) (*Table, error) {
+func build(rows []Row) (*Table, error) {
 	var problems []error
 	endpoints := make([]Endpoint, 0, len(rows))
 	seen := map[ID]int{}
@@ -136,7 +140,13 @@ func Build(rows []Row) (*Table, error) {
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("endpoint table:\n%w", errors.Join(problems...))
 	}
-	return &Table{endpoints: endpoints}, nil
+	var hosts []string
+	for _, e := range endpoints {
+		if !slices.Contains(hosts, e.host) {
+			hosts = append(hosts, e.host)
+		}
+	}
+	return &Table{endpoints: endpoints, hosts: hosts}, nil
 }
 
 func parseEndpoint(row Row) (Endpoint, error) {
@@ -146,8 +156,8 @@ func parseEndpoint(row Row) (Endpoint, error) {
 	if row.id == "" {
 		return fail("empty id")
 	}
-	if row.host == "" || strings.ToLower(row.host) != row.host || strings.ContainsAny(row.host, ":/") {
-		return fail("host %q is not lowercase with no port", row.host)
+	if !hostname.MatchString(row.host) {
+		return fail("host %q is not a lowercase DNS name with no port", row.host)
 	}
 	if !slices.Contains(methods, row.method) {
 		return fail("method %q is not one of %v", row.method, methods)
@@ -189,14 +199,15 @@ func parseSegment(text string) (segment, error) {
 		}
 		s = segment{param: true, prefix: m[1], name: m[2], suffix: m[3]}
 	}
-	// A request segment is matched decoded, so fixed text holding a delimiter or an escape, or a dot
-	// segment, is never what a request for it is matched as. A param stands for at least one
+	// A request segment is matched decoded and dot-normalized, and a client's URL parser drops or
+	// rewrites control characters and backslashes, so fixed text holding a delimiter, an escape, one
+	// of those, or a dot segment is never what a request for it is matched as. A param stands for at least one
 	// character, so `x` stands in for it here.
 	sample := s.text
 	if s.param {
 		sample = s.prefix + "x" + s.suffix
 	}
-	if strings.ContainsAny(sample, "%?#") || sample == "." || sample == ".." {
+	if strings.ContainsAny(sample, `%?#\`) || strings.ContainsFunc(sample, unicode.IsControl) || sample == "." || sample == ".." {
 		return segment{}, fmt.Errorf("segment %s is not what a request for it is matched as", text)
 	}
 	return s, nil
@@ -216,15 +227,7 @@ func overlap(a, b Endpoint) bool {
 
 // Hosts is every host the table knows, in table order: the hosts a server given that table accepts
 // CONNECT for and puts on its leaf certificate.
-func (t *Table) Hosts() []string {
-	var hosts []string
-	for _, e := range t.endpoints {
-		if !slices.Contains(hosts, e.host) {
-			hosts = append(hosts, e.host)
-		}
-	}
-	return hosts
-}
+func (t *Table) Hosts() []string { return slices.Clone(t.hosts) }
 
 // Endpoints is every endpoint of the table, in table order.
 func (t *Table) Endpoints() []Endpoint { return slices.Clone(t.endpoints) }
@@ -236,23 +239,35 @@ type Resolution struct {
 	Params   map[string]string
 }
 
-// Resolve finds the endpoint a request is addressed to: the method, u's host (any case, any port) and
-// u's path (its query ignored), each path segment percent-decoded before it is matched. False when
-// no endpoint matches, including when a segment's escapes do not decode to UTF-8.
-func (t *Table) Resolve(method string, u *url.URL) (Resolution, bool) {
-	host := strings.ToLower(u.Hostname())
-	rest, ok := strings.CutPrefix(u.EscapedPath(), "/")
+// Resolve finds the endpoint a request is addressed to: its method, its host as the Host header
+// carries it (any case, any port; a server request's URL has no host inside a tunnel), and its
+// escaped path. Each path segment is percent-decoded, then dot segments are removed as a WHATWG URL
+// parser removes them, before it is matched. False when no endpoint matches, including when a
+// segment's escapes do not decode to UTF-8.
+func (t *Table) Resolve(method, host, escapedPath string) (Resolution, bool) {
+	host = strings.ToLower((&url.URL{Host: host}).Hostname())
+	rest, ok := strings.CutPrefix(escapedPath, "/")
 	if !ok {
 		return Resolution{}, false
 	}
 	raw := strings.Split(rest, "/")
-	texts := make([]string, len(raw))
+	texts := make([]string, 0, len(raw))
 	for i, r := range raw {
 		text, err := url.PathUnescape(r)
 		if err != nil || !utf8.ValidString(text) {
 			return Resolution{}, false
 		}
-		texts[i] = text
+		if text != "." && text != ".." {
+			texts = append(texts, text)
+			continue
+		}
+		if text == ".." && len(texts) > 0 {
+			texts = texts[:len(texts)-1]
+		}
+		// A trailing dot segment leaves the directory it names: /a/b/.. is /a/.
+		if i == len(raw)-1 {
+			texts = append(texts, "")
+		}
 	}
 	for _, e := range t.endpoints {
 		if e.host != host || e.method != method || len(e.segments) != len(texts) {
@@ -266,14 +281,15 @@ func (t *Table) Resolve(method string, u *url.URL) (Resolution, bool) {
 }
 
 func (e Endpoint) match(texts []string) (map[string]string, bool) {
-	params := map[string]string{}
 	for i, s := range e.segments {
-		text := texts[i]
-		if !s.matches(text) {
+		if !s.matches(texts[i]) {
 			return nil, false
 		}
+	}
+	params := map[string]string{}
+	for i, s := range e.segments {
 		if s.param {
-			params[s.name] = text[len(s.prefix) : len(text)-len(s.suffix)]
+			params[s.name] = texts[i][len(s.prefix) : len(texts[i])-len(s.suffix)]
 		}
 	}
 	return params, true
