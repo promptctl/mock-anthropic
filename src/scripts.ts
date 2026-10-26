@@ -67,6 +67,9 @@ export type Reply = z.output<typeof ReplySchema>
 export type MessageReply = Extract<Reply, { kind: 'message' }>
 export type LiteralReply = Extract<Reply, { kind: 'literal' }>
 
+// [LAW:single-enforcer] A reply written in code is held to the schema a script file's reply is.
+export const parseReply = (reply: z.input<typeof ReplySchema>): Reply => ReplySchema.parse(reply)
+
 // Every needle must appear: `bodyContains` anywhere in the raw body (the JSON text as sent, so a
 // needle can name a field), `lastUserContains` within one of the last user message's texts. An empty needle would match everything, so it is refused; a script with no
 // needles answers every Messages request.

@@ -61,7 +61,7 @@ A consumer supplies a directory of script files. Each file says which Messages r
 Claude Code makes some model calls beside a turn. The mock recognizes each one by its prompt and generates the answer, so a consumer never has to script them:
 
 - **Session title.** Both phrasings are covered: older builds' "Generate a concise, sentence-case title" and, from 2.1.283 on, "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
-- **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is in the format the prompt asks for: `<severity>N</severity>`, where a value below 50 allows the action, or `<block>yes</block>` / `<block>no</block>` (2.1.88, and 2.1.289 unless its `tengu_auto_mode_config` flag asks for a severity). The default allows; a consumer can script a block.
+- **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is in the format the prompt asks for: `<severity>N</severity>`, where a value below 50 allows the action; `<block>yes</block>` / `<block>no</block>`; or a `classify_result` tool call (2.1.88's default; its `tengu_auto_mode_config` flag's `twoStageClassifier` selects `<block>`, and 2.1.289 asks for a severity or `<block>` by the same flag). The default allows; a consumer can script a block.
 - **Quota probe.**
 
 A consumer script that matches one of these requests takes precedence over the built-in answer.

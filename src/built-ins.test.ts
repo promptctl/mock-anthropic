@@ -37,18 +37,27 @@ const TITLE_OLDER = 'Generate a concise, sentence-case title'
 const CLASSIFIER = 'You are a security monitor for autonomous AI coding agents.'
 const SEVERITY_FORMAT = '## Output Format\n\nOutput <severity>N</severity> where N is an integer 0-100 and 50 is exactly the allow/block boundary.'
 const BLOCK_FORMAT = '## Output Format\n\nIf the action should be blocked:\n<block>yes</block>\n\nIf the action should be allowed:\n<block>no</block>'
+const TOOL_FORMAT = 'Use the classify_result tool to report your classification.'
 const OTHER_FORMAT = '## Output Format\n\nAnswer ALLOW or DENY.'
-const classifierRequest = (format: string) =>
+// Each format's prompt is sent with its own closing instruction, and the tool format with the tool.
+const classifierRequest = (format: string, closing: string, extra: Record<string, unknown> = {}) =>
   sideQuery(
     `${CLASSIFIER}\n\n## Context\n\nThe agent you are monitoring is an autonomous coding agent.\n\n${format}`,
     [
       { type: 'text', text: '<transcript>\n' },
       { type: 'text', text: 'Bash: ls -la\n' },
       { type: 'text', text: '</transcript>\n' },
-      { type: 'text', text: 'Respond with <severity>N</severity> ONLY.' },
+      { type: 'text', text: closing },
     ],
-    { max_tokens: 64, stop_sequences: ['</severity>'] },
+    { max_tokens: 64, ...extra },
   )
+const severityRequest = () => classifierRequest(SEVERITY_FORMAT, 'Respond with <severity>N</severity> ONLY.', { stop_sequences: ['</severity>'] })
+const blockRequest = () => classifierRequest(BLOCK_FORMAT, '\nErr on the side of blocking. <block> immediately.')
+const toolRequest = () =>
+  classifierRequest(TOOL_FORMAT, 'Classify the action.', {
+    tools: [{ name: 'classify_result', input_schema: { type: 'object' } }],
+    tool_choice: { type: 'tool', name: 'classify_result' },
+  })
 
 const QUOTA_PROBE = { model: MODEL, max_tokens: 1, messages: [{ role: 'user', content: 'quota' }] }
 
@@ -77,10 +86,10 @@ describe('built-in answers', () => {
   }
 
   test('the auto mode classifier, asked for a severity, allows', async () => {
-    const { verdict, response, facts } = await send(classifierRequest(SEVERITY_FORMAT))
+    const { verdict, response, facts } = await send(severityRequest())
     expect(verdict).toEqual({ outcome: 'served' })
     expect(severity(await replyText(response))).toBeLessThan(50)
-    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier', reply: { stop_reason: 'end_turn' } })
+    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier, severity', reply: { stop_reason: 'end_turn' } })
   })
 
   test('the quota probe gets a one-token message', async () => {
@@ -92,16 +101,27 @@ describe('built-in answers', () => {
   })
 
   test('the auto mode classifier, asked for a block decision, allows', async () => {
-    const { verdict, response, facts } = await send(classifierRequest(BLOCK_FORMAT))
+    const { verdict, response, facts } = await send(blockRequest())
     expect(verdict).toEqual({ outcome: 'served' })
-    // Claude Code's reading of a block answer: every <block> tag says the same, and `no` allows.
+    // Claude Code's reading of a block answer: the first <block> tag decides, and `no` allows.
     expect([...(await replyText(response)).matchAll(/<block>(yes|no)\b/gi)].map(tag => tag[1])).toEqual(['no'])
-    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier' })
+    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier, block', reply: { stop_reason: 'end_turn' } })
+  })
+
+  test('the auto mode classifier, asked for a classify_result call, allows', async () => {
+    const { verdict, response, facts } = await send(toolRequest())
+    expect(verdict).toEqual({ outcome: 'served' })
+    // Claude Code's reading of a tool answer: the classify_result call's input, which must parse.
+    const message = (await response.json()) as { content: { type: string; id?: string; name?: string; input?: unknown }[] }
+    expect(message.content.filter(block => block.type === 'tool_use')).toEqual([
+      { type: 'tool_use', id: expect.any(String), name: 'classify_result', input: { thinking: expect.any(String), shouldBlock: false, reason: expect.any(String) } },
+    ])
+    expect(facts).toMatchObject({ script: 'built-in: auto mode classifier, classify_result tool', reply: { stop_reason: 'tool_use' } })
   })
 
   test('a consumer script blocks the classifier, ahead of the built-in', async () => {
     const dir = await directory({ 'block.json': { match: { bodyContains: [CLASSIFIER] }, reply: says('<severity>72</severity>') } })
-    const { response, facts } = await send(classifierRequest(SEVERITY_FORMAT), [dir])
+    const { response, facts } = await send(severityRequest(), [dir])
     expect(severity(await replyText(response))).toBeGreaterThanOrEqual(50)
     expect(facts).toMatchObject({ script: join(dir, 'block.json') })
   })
@@ -121,17 +141,19 @@ describe('built-in answers', () => {
   })
 
   test('a classifier asking for an answer in a format no built-in knows gets the 400', async () => {
-    const { verdict, response } = await send(classifierRequest(OTHER_FORMAT))
+    const { verdict, response } = await send(classifierRequest(OTHER_FORMAT, 'Answer now.'))
     expect(verdict).toMatchObject({ outcome: 'unmatched' })
     expect(response.status).toBe(400)
   })
 
   test("a main turn that quotes the prompts is not one of Claude Code's own calls", async () => {
+    // Quoted in the conversation, and in the main prompt's block after Claude Code's own opening, as an
+    // appended system prompt would be.
     const quoted = `What does "${TITLE_CURRENT}" mean, and "${CLASSIFIER} ${SEVERITY_FORMAT}"? Also: quota`
     const { verdict } = await send({
       model: MODEL,
       max_tokens: 1,
-      system: [BILLING, { type: 'text', text: 'You are Claude Code.' }],
+      system: [BILLING, { type: 'text', text: `You are Claude Code.\n\n${TITLE_OLDER} ${quoted}` }],
       messages: [{ role: 'user', content: quoted }],
     })
     expect(verdict).toMatchObject({ outcome: 'unmatched' })
