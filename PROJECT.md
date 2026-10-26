@@ -19,6 +19,7 @@ It is the one shared mock for all of our projects. It replaces the copy in `bran
 - `downloads.claude.ai`: the plugin marketplace version pointer.
 - `raw.githubusercontent.com`: the Claude Code changelog.
 - `http-intake.logs.us5.datadoghq.com`: the log intake.
+- `mcp-proxy.anthropic.com`: claude.ai connector traffic, refused as out of scope.
 
 ## How a program reaches it
 
@@ -89,7 +90,7 @@ Claude Code 2.1.289 also calls the following, which must be answered:
 
 ### Endpoint table
 
-A single table lists every endpoint Claude Code is known to call: host, method, path template (a path segment in braces matches any single segment), and either the generator that answers it or the reason it is out of scope. Out-of-scope endpoints (remote sessions, the browser login flow, feedback upload, and so on) are refused with their reason.
+A single table lists every endpoint Claude Code is known to call: host, method, path template (`{name}` in a path segment matches any non-empty text there, so `{org}` matches one whole segment and `{sha}.zip` one that ends in `.zip`), and either the generator that answers it or the reason it is out of scope. Out-of-scope endpoints (remote sessions, the browser login flow, feedback upload, and so on) are refused with their reason.
 
 A `coverage` command lists every endpoint as answered or out of scope, and exits non-zero if an in-scope endpoint has no generator.
 
