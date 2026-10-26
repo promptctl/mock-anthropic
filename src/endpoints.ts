@@ -34,7 +34,8 @@ const PLATFORM = 'platform.claude.com'
 const CLAUDE_AI = 'claude.ai'
 const DOWNLOADS = 'downloads.claude.ai'
 const GITHUB_RAW = 'raw.githubusercontent.com'
-const DATADOG = 'http-intake.logs.us5.datadoghq.com'
+const DATADOG_LOGS = 'http-intake.logs.us5.datadoghq.com'
+const DATADOG_BROWSER = 'browser-intake-us5-datadoghq.com'
 const MCP_PROXY = 'mcp-proxy.anthropic.com'
 
 // Reasons many rows share, one constant each.
@@ -47,6 +48,17 @@ const FEEDBACK = 'feedback upload'
 const TRIGGERS = 'scheduled cloud agents'
 const PREFLIGHT = '`claude doctor` connectivity preflight'
 const CONNECTORS = 'claude.ai connectors'
+
+// [LAW:one-source-of-truth] Claude Code 2.1.289's additions, which PROJECT.md lists under "Claude
+// Code 2.1.289 also calls"; a test holds the list equal to these rows.
+export const CLAUDE_CODE_2_1_289_ADDITIONS = [
+  inScope('organization-skills', API, 'GET', '/api/oauth/organizations/{org}/skills/list-skills'),
+  inScope('model-selector', API, 'GET', '/api/organizations/{org}/model_selector/cc'),
+  inScope('organization-marketplaces', API, 'GET', '/api/oauth/organizations/{org}/marketplaces'),
+  inScope('organization-plugins', API, 'GET', '/api/oauth/organizations/{org}/plugins/list-plugins'),
+  inScope('datadog-logs', DATADOG_LOGS, 'POST', '/api/v2/logs'),
+  inScope('datadog-error-tracking', DATADOG_BROWSER, 'POST', '/api/v2/logs'),
+] as const
 
 const ROWS = [
   inScope('messages', API, 'POST', '/v1/messages'),
@@ -73,12 +85,7 @@ const ROWS = [
   inScope('marketplace-version', DOWNLOADS, 'GET', '/claude-code-releases/plugins/claude-plugins-official/latest'),
   inScope('changelog', GITHUB_RAW, 'GET', '/anthropics/claude-code/refs/heads/main/CHANGELOG.md'),
 
-  // Claude Code 2.1.289's additions.
-  inScope('organization-skills', API, 'GET', '/api/oauth/organizations/{org}/skills/list-skills'),
-  inScope('model-selector', API, 'GET', '/api/organizations/{org}/model_selector/cc'),
-  inScope('organization-marketplaces', API, 'GET', '/api/oauth/organizations/{org}/marketplaces'),
-  inScope('organization-plugins', API, 'GET', '/api/oauth/organizations/{org}/plugins/list-plugins'),
-  inScope('datadog-logs', DATADOG, 'POST', '/api/v2/logs'),
+  ...CLAUDE_CODE_2_1_289_ADDITIONS,
 
   outOfScope('claude-cli-profile', API, 'GET', '/api/claude_cli_profile', API_KEY_LOGIN),
   outOfScope('oauth-authorize', PLATFORM, 'GET', '/oauth/authorize', BROWSER_LOGIN),

@@ -19,6 +19,7 @@ It is the one shared mock for all of our projects. It replaces the copy in `bran
 - `downloads.claude.ai`: the plugin marketplace version pointer.
 - `raw.githubusercontent.com`: the Claude Code changelog.
 - `http-intake.logs.us5.datadoghq.com`: the log intake.
+- `browser-intake-us5-datadoghq.com`: error tracking.
 - `mcp-proxy.anthropic.com`: claude.ai connector traffic, refused as out of scope.
 
 ## How a program reaches it
@@ -83,11 +84,12 @@ Each one has a generator that produces a minimal valid response for the Claude C
 
 Claude Code 2.1.289 also calls the following, which must be answered:
 
-- `GET /api/oauth/organizations/{org}/skills/list-skills`
-- `GET /api/organizations/{org}/model_selector/cc`
-- `GET /api/oauth/organizations/{org}/marketplaces`
-- `GET /api/oauth/organizations/{org}/plugins/list-plugins`
-- `POST /api/v2/logs` on the Datadog intake
+- `GET api.anthropic.com/api/oauth/organizations/{org}/skills/list-skills`
+- `GET api.anthropic.com/api/organizations/{org}/model_selector/cc`
+- `GET api.anthropic.com/api/oauth/organizations/{org}/marketplaces`
+- `GET api.anthropic.com/api/oauth/organizations/{org}/plugins/list-plugins`
+- `POST http-intake.logs.us5.datadoghq.com/api/v2/logs`: the Datadog log intake
+- `POST browser-intake-us5-datadoghq.com/api/v2/logs`: Datadog error tracking
 
 ### Endpoint table
 

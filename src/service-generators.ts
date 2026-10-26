@@ -33,10 +33,12 @@ export function serviceGenerators() {
     // No flags. Both builds read an empty map as no payload and keep the flags the config dir cached,
     // so a fresh one runs every flag at its default.
     'feature-flag-eval': json({ features: {} }),
-    // Neither build reads these answers, and 2.1.289 may gzip what it sends, so the body is not read.
+    // Neither build reads these answers' bodies, and 2.1.289 may gzip what it sends, so the request body
+    // is not read either. 2.1.289's error tracking logs a status other than 2xx as a warning.
     'event-logging-batch': json({}),
     'event-logging-v2-batch': json({}),
     'datadog-logs': json({}),
+    'datadog-error-tracking': json({}),
     // Off: on, 2.1.289's BigQuery exporter posts to the refused `otel-metrics` row.
     'metrics-enabled': json({ metrics_logging_enabled: false }),
     // No settings: both builds read a 204 as none configured.
