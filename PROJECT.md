@@ -19,6 +19,7 @@ It is the one shared mock for all of our projects. It replaces the copy in `bran
 - `downloads.claude.ai`: the plugin marketplace version pointer.
 - `raw.githubusercontent.com`: the Claude Code changelog.
 - `http-intake.logs.us5.datadoghq.com`: the log intake.
+- `mcp-proxy.anthropic.com`: claude.ai connector traffic, refused as out of scope.
 
 ## How a program reaches it
 
