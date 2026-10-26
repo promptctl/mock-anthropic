@@ -8,3 +8,7 @@ Start by running `lit quickstart` to load the workflow instructions. It prints h
 As you work a ticket, record its phase at each move: `lit phase <id> --to impl` when you start writing code, `lit phase <id> --to review` when its PR opens, `lit phase <id> --to merge` when review is done and the merge is under way. `lit start` puts it in `plan`, and `lit done <id>` ends it.
 
 <!-- END LIT INTEGRATION -->
+
+## Tests never read markdown
+
+No test may read, parse, or depend on any markdown file (PROJECT.md, CLAUDE.md, AGENTS.md, a README, or any other `.md`). Docs are edited freely, and a doc edit must never fail CI. A test asserts on code and its behavior; where code and a doc must agree, the code is the source the test checks.
