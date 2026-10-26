@@ -97,8 +97,10 @@ A `coverage` command lists every endpoint as answered or out of scope, and exits
 ## Failure behavior
 
 - A request with no endpoint, an out-of-scope endpoint, or a Messages request that no script and no built-in matches gets a 400. The body names the method, host, path, and why. The mock also writes one `UNMATCHED` line on stderr.
-- A refused `CONNECT` writes a `REFUSED` line on stderr.
-- A consumer test can therefore fail on any `UNMATCHED` or `REFUSED` line, and should.
+- A refused `CONNECT` writes a `REFUSED` line on stderr. So does a connection that does not open with an HTTP request line, such as TLS sent straight to the port.
+- A failure of the mock's own writes a `FAILED` line: a generator that throws (the client gets a 500), a response body that breaks partway, or a connection that closes before any request reaches the mock (for a tunnel, most often a client that does not trust the CA).
+- Every request and every connection writes exactly one line, starting with its outcome: `SERVED`, `UNMATCHED`, `FAILED` or `ABORTED` for a request, `CLOSED`, `REFUSED` or `FAILED` for a connection.
+- A consumer test can therefore fail on any `UNMATCHED`, `REFUSED` or `FAILED` line, and should.
 
 ## Commands
 

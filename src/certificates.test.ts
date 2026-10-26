@@ -5,7 +5,9 @@ import tls from 'node:tls'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { type Certificates, ensureCertificates, publish } from './certificates.ts'
-import { ENDPOINT_HOSTS } from './endpoints.ts'
+import { ENDPOINT_TABLE, tableHosts } from './endpoints.ts'
+
+const HOSTS = tableHosts(ENDPOINT_TABLE)
 
 const root = await mkdtemp(join(tmpdir(), 'mock-anthropic-certs-'))
 afterAll(() => rm(root, { recursive: true, force: true }))
@@ -55,7 +57,7 @@ async function handshake(certs: Certificates, host: string): Promise<void> {
 
 describe('ensureCertificates', async () => {
   const dir = await fresh()
-  const first = await ensureCertificates(dir, ENDPOINT_HOSTS)
+  const first = await ensureCertificates(dir, HOSTS)
 
   test('a first start generates the CA and the leaf', () => {
     expect([first.ca.outcome, first.leaf.outcome]).toEqual(['generated', 'generated'])
@@ -67,11 +69,11 @@ describe('ensureCertificates', async () => {
   })
 
   test("the leaf's SANs are exactly the endpoint table's hosts", async () => {
-    expect((await sans(first)).toSorted()).toEqual([...ENDPOINT_HOSTS].toSorted())
+    expect((await sans(first)).toSorted()).toEqual([...HOSTS].toSorted())
   })
 
   test('a client trusting only the CA accepts the leaf for every host in the table', async () => {
-    await Promise.all(ENDPOINT_HOSTS.map(host => handshake(first, host)))
+    await Promise.all(HOSTS.map(host => handshake(first, host)))
   })
 
   test('a client rejects the leaf for a host outside the table', async () => {
@@ -81,7 +83,7 @@ describe('ensureCertificates', async () => {
   test('a second start reuses both, byte for byte', async () => {
     const paths = [first.ca.certPath, first.leaf.certPath, first.leaf.keyPath]
     const before = await Promise.all(paths.map(read))
-    const second = await ensureCertificates(dir, ENDPOINT_HOSTS)
+    const second = await ensureCertificates(dir, HOSTS)
     expect(second).toEqual({
       ca: { ...first.ca, outcome: 'reused' },
       leaf: { ...first.leaf, outcome: 'reused' },
@@ -108,7 +110,7 @@ describe('ensureCertificates', async () => {
 
 test('two starts at once in an empty dir agree on one CA and one leaf', async () => {
   const dir = await fresh()
-  const [a, b] = await Promise.all([ensureCertificates(dir, ENDPOINT_HOSTS), ensureCertificates(dir, ENDPOINT_HOSTS)])
+  const [a, b] = await Promise.all([ensureCertificates(dir, HOSTS), ensureCertificates(dir, HOSTS)])
   expect(a.ca.certPath).toBe(b.ca.certPath)
   expect(a.leaf.certPath).toBe(b.leaf.certPath)
   // Exactly one of the two published each certificate; the other found it or lost the race to it.
