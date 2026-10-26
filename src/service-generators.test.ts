@@ -9,12 +9,13 @@ const { directory } = await scriptDirectories('service-generators')
 const API = 'https://api.anthropic.com'
 const send = (method: Method, url: string, body = '') => sendTo(mockGenerators({ account: DEFAULT_ACCOUNT, scenarioDirs: [] }), method, url, body)
 
-// What Claude Code sends, as far as the answer depends on it: an event batch is answered whatever it
-// holds, gzipped or not, so one that is not JSON is sent here.
+// What Claude Code sends, as far as the answer depends on it. 2.1.289 may gzip an event batch, which
+// reaches a generator as the server reads every body: decoded as UTF-8 text.
+const GZIPPED_BATCH = new TextDecoder().decode(Bun.gzipSync('{"events":[]}'))
 const ANSWERS: readonly { name: string; method: Method; url: string; body?: string; status: number; type: string | null; answer: string }[] = [
   { name: 'feature-flag eval', method: 'POST', url: `${API}/api/eval/sdk-mock`, body: '{"attributes":{}}', status: 200, type: 'application/json', answer: '{"features":{}}' },
   { name: 'event logging batch', method: 'POST', url: `${API}/api/event_logging/batch`, body: '{"events":[]}', status: 200, type: 'application/json', answer: '{}' },
-  { name: 'event logging v2 batch, gzipped', method: 'POST', url: `${API}/api/event_logging/v2/batch`, body: '\u001f\u008b\u0008', status: 200, type: 'application/json', answer: '{}' },
+  { name: 'event logging v2 batch, gzipped', method: 'POST', url: `${API}/api/event_logging/v2/batch`, body: GZIPPED_BATCH, status: 200, type: 'application/json', answer: '{}' },
   { name: 'Datadog log intake', method: 'POST', url: 'https://http-intake.logs.us5.datadoghq.com/api/v2/logs', body: '[]', status: 200, type: 'application/json', answer: '{}' },
   { name: 'metrics_enabled', method: 'GET', url: `${API}/api/claude_code/organizations/metrics_enabled`, status: 200, type: 'application/json', answer: '{"metrics_logging_enabled":false}' },
   { name: 'remote managed settings, none', method: 'GET', url: `${API}/api/claude_code/settings`, status: 204, type: null, answer: '' },

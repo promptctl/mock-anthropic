@@ -1,4 +1,4 @@
-import type { PlainRow } from './account-generators.ts'
+import type { accountGenerators, PlainRow } from './account-generators.ts'
 import { type Answer, answer, type Generators, type Json } from './dispatch.ts'
 import { parseCountTokensRequest } from './messages.ts'
 import { inputTokens } from './render.ts'
@@ -12,11 +12,15 @@ import { inputTokens } from './render.ts'
 // [LAW:one-type-per-behavior] A fixed answer: the same response to every request, with nothing decided
 // to report. A Response is read once, so each request gets a new one.
 const fixed = (make: () => Response) => (): Answer => ({ kind: 'response', response: make(), facts: {} })
-const json = (body: Json) => fixed(() => Response.json(body))
+const json = (body: Json) => (): Answer => answer(body, {})
 const text = (body: string) => fixed(() => new Response(body, { headers: { 'content-type': 'text/plain; charset=utf-8' } }))
 
 // The marketplace commit the version pointer names, obviously not a real one.
 const MARKETPLACE_SHA = '0'.repeat(40)
+
+// [LAW:single-enforcer] The plain rows the account map does not answer. A row given a generator in
+// both maps fails here, whichever map gained it, so neither can silently replace the other's.
+type ServiceRow = Exclude<PlainRow, { id: keyof ReturnType<typeof accountGenerators> }>
 
 export function serviceGenerators() {
   return {
@@ -50,5 +54,5 @@ export function serviceGenerators() {
     'marketplace-version': text(`${MARKETPLACE_SHA}\n`),
     // No `## ` section, so no release notes.
     changelog: text('# Changelog\n'),
-  } satisfies Generators<PlainRow>
+  } satisfies Generators<ServiceRow>
 }

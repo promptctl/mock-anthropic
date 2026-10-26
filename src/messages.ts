@@ -49,23 +49,32 @@ const MessagesBody = RequestBase.extend({ max_tokens: z.int().positive(), stream
     return { model: body.model, max_tokens: body.max_tokens, stream: body.stream, systemTexts: body.system, lastUserTexts: lastUser.content }
   })
 
+declare const parsed: unique symbol
+
+// [LAW:parse-dont-validate] A request body this module parsed. The brand is a type-level stamp with no
+// runtime value, applied only by the parses below, so nothing else can pass for a parsed request.
+type Parsed = { readonly [parsed]: true }
+
 // `raw` is the body as sent, for matching anywhere in it; `lastUserTexts` are the texts of the last
 // `user` message, the current turn, apart from the same words earlier in the conversation;
 // `systemTexts` are the system prompt's blocks; `max_tokens` is the reply's budget; `model` and
 // `stream` say what to answer as and how.
-export type MessagesRequest = { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
+export type MessagesRequest = Parsed & { readonly raw: string } & Readonly<z.output<typeof MessagesBody>>
 
 // A body that is not a Messages request is the generator's to decline, with the reason.
 export function parseMessagesRequest(raw: string): ParsedBody<MessagesRequest> {
   const body = parseJsonBody(raw, MessagesBody, 'a Messages request')
-  return body.kind === 'parsed' ? { kind: 'parsed', value: { raw, ...body.value } } : body
+  return body.kind === 'parsed' ? { kind: 'parsed', value: stamp({ raw, ...body.value }) } : body
 }
 
 // `POST /v1/messages/count_tokens`: the base alone. No script is matched against it, so it needs no
 // last user message; it is counted, from `raw`, as a Messages request's input is.
-export type CountTokensRequest = { readonly raw: string }
+export type CountTokensRequest = Parsed & { readonly raw: string }
 
 export function parseCountTokensRequest(raw: string): ParsedBody<CountTokensRequest> {
   const body = parseJsonBody(raw, RequestBase, 'a token count request')
-  return body.kind === 'parsed' ? { kind: 'parsed', value: { raw } } : body
+  return body.kind === 'parsed' ? { kind: 'parsed', value: stamp({ raw }) } : body
 }
+
+// The one place the brand is applied, to a value a parse above just produced.
+const stamp = <T>(value: T) => value as T & Parsed
