@@ -133,6 +133,7 @@ Every invocation ends with one line on stderr recording it, in the same form as 
 - Go.
 - `go test ./...` runs the tests, and `go vet ./...` checks the code.
 - CI (GitHub Actions) runs the tests and `go vet` on every pull request.
+- No test reads or depends on any markdown file, this one included. A doc edit never fails CI.
 - Releases are git tags, and consumers pin a tag.
 - The repository is public, so nothing in it identifies a real account.
 
