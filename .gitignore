@@ -1,4 +1,3 @@
-node_modules/
 # Claude Code's agent worktrees are nested repositories, not content of this one.
 .claude/worktrees/
 .DS_Store
