@@ -114,3 +114,19 @@ func Directory(given, text string) (string, error) {
 	}
 	return path, nil
 }
+
+// File is a command-line path that must name a regular file there now.
+func File(given, text string) (string, error) {
+	path, err := Absolute(given, text)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", &command.UsageError{Why: fmt.Sprintf("%s %s: %v", given, path, errors.Unwrap(err))}
+	}
+	if !info.Mode().IsRegular() {
+		return "", &command.UsageError{Why: fmt.Sprintf("%s %s: not a file", given, path)}
+	}
+	return path, nil
+}

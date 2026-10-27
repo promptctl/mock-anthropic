@@ -426,3 +426,20 @@ func TestLoginWritesAConfigDirectoryAndRecordsIt(t *testing.T) {
 		t.Errorf("stdout %q, want none", f.stdout)
 	}
 }
+
+func TestEnvPrintsTheVariablesAndRecordsThem(t *testing.T) {
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := run(t, "env", "--port", "4040", "--ca", ca, "--config-dir", "/tmp/claude")
+	if f.exit != 0 {
+		t.Fatalf("exit %d, record %v", f.exit, f.record)
+	}
+	if !strings.Contains(f.stdout, "HTTPS_PROXY=http://127.0.0.1:4040\n") || !strings.Contains(f.stdout, "CLAUDE_CONFIG_DIR=/tmp/claude\n") {
+		t.Errorf("stdout %q", f.stdout)
+	}
+	if facts := f.record["facts"].(map[string]any); facts["port"] != float64(4040) || facts["config_dir"] != "/tmp/claude" {
+		t.Errorf("facts %v", facts)
+	}
+}

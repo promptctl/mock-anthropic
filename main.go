@@ -7,6 +7,7 @@ import (
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 	"github.com/promptctl/mock-anthropic/internal/coverage"
+	"github.com/promptctl/mock-anthropic/internal/env"
 	"github.com/promptctl/mock-anthropic/internal/login"
 	"github.com/promptctl/mock-anthropic/internal/serve"
 )
@@ -19,6 +20,7 @@ var Commands = command.Commands{
 	"serve":    serve.Command(os.Stdout, stderr),
 	"coverage": coverage.Command(os.Stdout),
 	"login":    login.Command(time.Now),
+	"env":      env.Command(os.Stdout),
 }
 
 func main() {
