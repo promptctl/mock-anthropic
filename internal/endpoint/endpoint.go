@@ -112,9 +112,6 @@ type Table struct {
 // For is the mock's endpoint table answering as a: the one owner of the table `serve` and `coverage` use.
 func For(a account.Account) *Table { return mustBuild(Rows(a)) }
 
-// Default is the table for the default account.
-var Default = For(account.Default())
-
 func mustBuild(rows []Row) *Table {
 	t, err := Build(rows)
 	if err != nil {

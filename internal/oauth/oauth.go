@@ -7,15 +7,9 @@ import "time"
 
 // Scopes are what a claude.ai login grants, as the token endpoint's space-separated `scope`. Claude
 // Code 2.1.289 saves a refreshed token only when `user:inference` is among them, and skips the
-// organization marketplaces call without `user:plugins`.
-var Scopes = []string{
-	"user:file_upload",
-	"user:inference",
-	"user:mcp_servers",
-	"user:plugins",
-	"user:profile",
-	"user:sessions:claude_code",
-}
+// organization marketplaces call without `user:plugins`. A constant, so no importer can change what
+// every refresh grants.
+const Scopes = "user:file_upload user:inference user:mcp_servers user:plugins user:profile user:sessions:claude_code"
 
 const (
 	AccessToken  = "mock-anthropic-access-token"

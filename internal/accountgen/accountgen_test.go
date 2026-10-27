@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
+	"github.com/promptctl/mock-anthropic/internal/accountgen"
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
 	"github.com/promptctl/mock-anthropic/internal/generator"
@@ -171,7 +172,7 @@ func TestTheTokenEndpointRefreshesTheMocksLogin(t *testing.T) {
 	if r.at(t, "expires_in") != oauth.TokenLifetime.Seconds() {
 		t.Errorf("expires_in = %v", r.at(t, "expires_in"))
 	}
-	if got, want := strings.Fields(r.at(t, "scope").(string)), oauth.Scopes; !slices.Equal(got, want) {
+	if got, want := strings.Fields(r.at(t, "scope").(string)), strings.Fields(oauth.Scopes); !slices.Equal(got, want) {
 		t.Errorf("scope = %v, want %v", got, want)
 	}
 	if r.at(t, "account", "uuid") != other.AccountUUID() || r.at(t, "account", "email_address") != other.EmailAddress() ||
@@ -210,7 +211,7 @@ func TestTheTokenEndpointRefusesWhatIsNotTheMocksLogin(t *testing.T) {
 // organizationPaths are the in-scope rows whose path names an organization, with a request path for each.
 func organizationRows() []endpoint.Endpoint {
 	var rows []endpoint.Endpoint
-	for _, e := range endpoint.Default.Endpoints() {
+	for _, e := range endpoint.For(account.Default()).Endpoints() {
 		if e.InScope() && strings.Contains(e.Path(), "{org}") {
 			rows = append(rows, e)
 		}
@@ -281,5 +282,26 @@ func TestNoBodyLeaksTheDefaultAccountsIdentity(t *testing.T) {
 				t.Errorf("%s %s leaks %q: %s", c.method, c.url, id, raw)
 			}
 		}
+	}
+}
+
+func TestAnUnparseableTokenRequestStillRecordsWhoseAccountItWas(t *testing.T) {
+	r := get(t, other, "POST", platform+"/v1/oauth/token", "grant_type=refresh_token")
+	if r.d.Verdict.Outcome != dispatch.Unmatched || r.d.Facts["account_uuid"] != other.AccountUUID() || r.d.Facts["organization_uuid"] != other.OrganizationUUID() {
+		t.Errorf("verdict = %+v, facts = %v, want a decline carrying the account's identity", r.d.Verdict, r.d.Facts)
+	}
+}
+
+func TestARequestedOrganizationIsBoundedInTheDeclineAndTheRecord(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	r := get(t, other, "GET", api+"/api/oauth/organizations/"+long+"/skills/list-skills", "")
+	if got, _ := r.d.Facts["organization_requested"].(string); len(got) > 60 || strings.Contains(r.d.Verdict.Why, long) {
+		t.Errorf("facts = %v, why = %q, want the requested organization cut short", r.d.Facts, r.d.Verdict.Why)
+	}
+}
+
+func TestAnOrganizationRowOnAPathWithNoOrgIsAnErrorNotADecline(t *testing.T) {
+	if _, err := accountgen.New(other).Skills(context.Background(), map[string]string{}, generator.Request{}); err == nil {
+		t.Error("a path with no {org} was answered or declined as if a consumer had named an organization")
 	}
 }

@@ -9,9 +9,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/generator"
@@ -66,14 +66,30 @@ const createdAt = "2026-01-01T00:00:00Z"
 // naming both, never answered as if it were the account's.
 func organization(a account.Account, body map[string]any) generator.Func {
 	return func(_ context.Context, params map[string]string, _ generator.Request) (generator.Answer, error) {
+		org, ok := params["org"]
+		if !ok {
+			// [LAW:no-silent-failure] A row without `{org}` is a table bug, not a consumer's mistake.
+			return generator.Answer{}, errors.New("organization-scoped generator on a path with no {org} segment")
+		}
 		facts := identity(a)
-		if org := params["org"]; org != a.OrganizationUUID() {
-			facts["organization_requested"] = org
-			why := fmt.Sprintf("organization %s is not the account's organization %s", org, a.OrganizationUUID())
+		if org != a.OrganizationUUID() {
+			shown := echo(org)
+			facts["organization_requested"] = shown
+			why := fmt.Sprintf("organization %q is not the account's organization %s", shown, a.OrganizationUUID())
 			return generator.Answer{Reply: generator.Declined{Why: why}, Facts: facts}, nil
 		}
 		return generator.JSON(body, facts)
 	}
+}
+
+// echo is a client-chosen value cut to a length a terminal line holds, as the account package cuts the
+// raw values it echoes.
+func echo(value string) string {
+	const limit = 40
+	if runes := []rune(value); len(runes) > limit {
+		return string(runes[:limit]) + "..."
+	}
+	return value
 }
 
 func profile(a account.Account) generator.Func {
@@ -202,12 +218,12 @@ func refusal(grantType string, kind refreshTokenKind) string {
 
 func token(a account.Account) generator.Func {
 	return func(_ context.Context, _ map[string]string, r generator.Request) (generator.Answer, error) {
-		req, err := parseTokenRequest(r.Body)
-		if err != nil {
-			return generator.Answer{Reply: generator.Declined{Why: err.Error()}, Facts: generator.Facts{}}, nil
-		}
 		// [LAW:nothing-unseen] What was asked, for the record whether answered or refused.
 		facts := identity(a)
+		req, err := parseTokenRequest(r.Body)
+		if err != nil {
+			return generator.Answer{Reply: generator.Declined{Why: err.Error()}, Facts: facts}, nil
+		}
 		facts["grant_type"] = req.GrantType
 		facts["refresh_token"] = string(req.kind())
 		if why := refusal(req.GrantType, req.kind()); why != "" {
@@ -218,7 +234,7 @@ func token(a account.Account) generator.Func {
 			"access_token":  oauth.AccessToken,
 			"refresh_token": oauth.RefreshToken,
 			"expires_in":    int64(oauth.TokenLifetime.Seconds()),
-			"scope":         strings.Join(oauth.Scopes, " "),
+			"scope":         oauth.Scopes,
 			"account":       map[string]any{"uuid": a.AccountUUID(), "email_address": a.EmailAddress()},
 			"organization":  map[string]any{"uuid": a.OrganizationUUID(), "name": a.OrganizationName()},
 		}, facts)

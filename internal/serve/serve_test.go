@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 	"github.com/promptctl/mock-anthropic/internal/server"
@@ -74,7 +75,7 @@ func TestServeAnswersAsTheAccountItWasGiven(t *testing.T) {
 		stop()
 		t.Fatalf("no ready line: %v (%s)", err, stderr.String())
 	}
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/oauth/organizations/%s/plugins/list-plugins", ready.Port, org))
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/api/oauth/organizations/%s/plugins/list-plugins", ready.Port, org))
 	if err != nil {
 		stop()
 		t.Fatal(err)
