@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,13 +32,15 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request and one per connection, from many goroutines at once.
+// request and one per connection, from many goroutines at once. Crash receives what fails in the
+// server's own goroutines, outside any request: an accept failing before Stop, or a line net/http logs.
 type Options struct {
 	Port     int
 	Table    *endpoint.Table
 	Handle   dispatch.Handler
 	CertsDir string
 	Emit     func(Event)
+	Crash    func(error)
 }
 
 // Server is a started mock. Stop ends it.
@@ -45,6 +48,7 @@ type Server struct {
 	table        *endpoint.Table
 	handle       dispatch.Handler
 	emit         func(Event)
+	crash        func(error)
 	certificates certificate.Certificates
 	tls          *tls.Config
 	front        net.Listener
@@ -106,6 +110,7 @@ func Start(o Options) (*Server, error) {
 		table:        o.Table,
 		handle:       o.Handle,
 		emit:         o.Emit,
+		crash:        o.Crash,
 		certificates: certs,
 		// HTTP/1.1 only: every connection is served by net/http's HTTP/1 server, which counts and
 		// records its requests.
@@ -116,6 +121,8 @@ func Start(o Options) (*Server, error) {
 	}
 	s.inner = &http.Server{
 		Handler: s,
+		// [LAW:no-silent-failure] net/http logs only what it could not answer; each line is the mock's.
+		ErrorLog: log.New(crashWriter(s.crash), "", 0),
 		// net/http is done with a connection, its last handler returned, once it reports it closed.
 		ConnState: func(c net.Conn, state http.ConnState) {
 			if state == http.StateClosed {
@@ -174,7 +181,7 @@ func (s *Server) accept() {
 		if err != nil {
 			// Only Stop closes the listener; any other accept error ends serving, and is the mock's.
 			if !s.isStopping() {
-				panic(fmt.Sprintf("accepting connections: %v", err))
+				s.crash(fmt.Errorf("accepting connections: %w", err))
 			}
 			return
 		}
@@ -751,3 +758,11 @@ func (q *request) record(status *int, facts generator.Facts, outcome RequestOutc
 var endedBys = map[ClosedBy]string{ByClient: "client closed", ByStop: "the mock stopped", ByServer: "the mock closed the connection"}
 
 func endedEarly(by ClosedBy, before string) string { return endedBys[by] + " before " + before }
+
+// crashWriter reports each line written to it as a crash.
+type crashWriter func(error)
+
+func (c crashWriter) Write(p []byte) (int, error) {
+	c(errors.New(strings.TrimSpace(string(p))))
+	return len(p), nil
+}

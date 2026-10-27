@@ -70,8 +70,11 @@ func (e *UsageError) Error() string { return e.Why }
 // Signals are the signals that ask an invocation to end, by the names its record gives them.
 var Signals = map[os.Signal]string{syscall.SIGHUP: "SIGHUP", syscall.SIGINT: "SIGINT", syscall.SIGTERM: "SIGTERM"}
 
-// Notify delivers every one of the Signals to a channel, the one the process hands Main.
+// Notify delivers every one of the Signals to a channel, the one the process hands Main. SIGPIPE is
+// ignored, so a write to a closed stdout or stderr fails as an error the command reports, instead of
+// killing the process before it writes its record.
 func Notify() <-chan os.Signal {
+	signal.Ignore(syscall.SIGPIPE)
 	signals := make(chan os.Signal, len(Signals))
 	for sig := range Signals {
 		signal.Notify(signals, sig)
@@ -228,14 +231,12 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	}()
 
 	var ends []end
+	crashed := false
 	for {
 		select {
 		case sig := <-signals:
-			select {
-			case s := <-done: // the command finished before the signal could end it; its ending stands
-				done <- s
+			if len(done) > 0 { // the command finished before the signal could end it; its ending stands
 				continue
-			default:
 			}
 			ends = append(ends, end{name: Signals[sig]})
 			cancel()
@@ -243,9 +244,11 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 				return failed(ends, nil, Facts{}), ends
 			}
 		case err := <-crashes:
-			ends = append(ends, end{name: "crash", crash: err.Error()})
+			ends, crashed = append(ends, end{name: "crash", crash: err.Error()}), true
 			cancel()
-			if cmd.Kind == Task || len(ends) > 1 {
+			// A crash never cuts a stop short: a stopping Service still returns, so what it learned stays
+			// on the record; a Task that already finished fails with its facts.
+			if cmd.Kind == Task && len(done) == 0 {
 				return failed(ends, nil, Facts{}), ends
 			}
 		case s := <-done:
@@ -257,7 +260,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			switch {
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
-			case s.err != nil || crashed(ends):
+			case s.err != nil || crashed:
 				return failed(ends, s.err, s.result.Facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
 				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
@@ -265,15 +268,6 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			return ending{Outcome: s.result.Answer, Facts: s.result.Facts}, ends
 		}
 	}
-}
-
-func crashed(ends []end) bool {
-	for _, e := range ends {
-		if e.name == "crash" {
-			return true
-		}
-	}
-	return false
 }
 
 // failed tells every end, in order: the first asked the command to finish, every later one came while

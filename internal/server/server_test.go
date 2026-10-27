@@ -134,7 +134,7 @@ func start(t *testing.T) *harness {
 		case ConnectionEvent:
 			h.connections <- e
 		}
-	}})
+	}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -221,6 +221,22 @@ func TestReportedCrashStopsAServiceAndKeepsItsFacts(t *testing.T) {
 	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke", "facts": map[string]any{"port": 1}})
 }
 
+// A sink that keeps failing reports again from every record its own stop writes; none of those cuts
+// the stop short.
+func TestCrashWhileACrashedServiceStopsKeepsItsFacts(t *testing.T) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+		crash(errors.New("a sink broke"))
+		<-ctx.Done()
+		crash(errors.New("a sink broke"))
+		return Result{Answer: OK, Facts: Facts{"port": 1}}, nil
+	}}}
+	exit, record, _ := run(t, service, []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke\nwhile the command was ending: a sink broke", "facts": map[string]any{"port": 1}})
+}
+
 func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
 	commands := Commands{"stand_in": {Kind: Task, Run: func(_ context.Context, _ []string, crash func(error)) (Result, error) {
 		crash(errors.New("a sink broke"))

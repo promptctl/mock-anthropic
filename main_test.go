@@ -288,6 +288,40 @@ func TestServeSecondSignalWhileStoppingFails(t *testing.T) {
 	}
 }
 
+// With stderr closed nothing can be recorded, but the write fails as an error serve reports, so the
+// process ends by its own exit code, not by SIGPIPE.
+func TestServeWithStderrClosedExitsFailed(t *testing.T) {
+	cmd := exec.Command(binary(t), "serve", "--port", "0")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill() })
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready struct{ Port int }
+	if err := json.Unmarshal([]byte(line), &ready); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Close()
+	if response, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", ready.Port)); err == nil {
+		response.Body.Close()
+	}
+	cmd.Wait()
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("exit %d (%v), want 1", code, cmd.ProcessState)
+	}
+}
+
 func TestServeOnAPortInUseFails(t *testing.T) {
 	holder, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

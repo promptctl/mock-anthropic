@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/command"
@@ -33,6 +32,10 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 				return command.Result{}, err
 			}
 			executable, err := os.Executable()
+			if err == nil {
+				// The build itself, not a symlink to it, so every way of reaching one build finds one CA.
+				executable, err = filepath.EvalSymlinks(executable)
+			}
 			if err != nil {
 				return command.Result{}, fmt.Errorf("finding the certificates directory: %w", err)
 			}
@@ -44,6 +47,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 				// one build presents the CA a consumer already trusts.
 				CertsDir: filepath.Join(filepath.Dir(executable), "certs"),
 				Emit:     Sink(stderr, crash),
+				Crash:    crash,
 			})
 			if err != nil {
 				return command.Result{}, err
@@ -103,6 +107,9 @@ type config struct {
 
 var portText = regexp.MustCompile(`^\d{1,5}$`)
 
+// oneDash is a flag name as package flag writes it in an error: one dash, after a space.
+var oneDash = regexp.MustCompile(`(\s)-(\w)`)
+
 // once is a flag that takes one value; given twice, it is a wrong command line.
 type once struct {
 	value *string
@@ -112,7 +119,7 @@ type once struct {
 func (o *once) String() string { return "" }
 func (o *once) Set(v string) error {
 	if o.value != nil {
-		return fmt.Errorf("--%s: given more than once", o.name)
+		return errors.New("given more than once")
 	}
 	o.value = &v
 	return nil
@@ -135,13 +142,7 @@ func parse(args []string) (config, error) {
 	fs.Var(&scenarios, "scenarios", "")
 	if err := fs.Parse(args); err != nil {
 		// flag names a flag by one dash; PROJECT.md and the usage line name every flag by two.
-		why, unknown := strings.CutPrefix(err.Error(), "flag provided but not defined: -")
-		if unknown {
-			why = "unknown flag: --" + strings.TrimPrefix(why, "-")
-		} else {
-			why = err.Error()
-		}
-		return config{}, &command.UsageError{Why: why}
+		return config{}, &command.UsageError{Why: oneDash.ReplaceAllString(err.Error(), "$1--$2")}
 	}
 	if fs.NArg() > 0 {
 		return config{}, &command.UsageError{Why: "unexpected argument: " + fs.Arg(0)}
