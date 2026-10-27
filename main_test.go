@@ -392,7 +392,13 @@ func TestCoverageExitsOneExactlyWhenThereAreGaps(t *testing.T) {
 	if want := map[bool]int{true: 1, false: 0}[len(gaps) > 0]; f.exit != want {
 		t.Errorf("exit %d with %d gaps, want %d", f.exit, len(gaps), want)
 	}
-	if got := strings.Count(f.stdout, "GAP "); got != len(gaps) {
+	got := 0
+	for _, line := range strings.Split(strings.TrimRight(f.stdout, "\n"), "\n") {
+		if strings.HasPrefix(line, "GAP ") {
+			got++
+		}
+	}
+	if got != len(gaps) {
 		t.Errorf("%d GAP lines on stdout, %d gaps on the record", got, len(gaps))
 	}
 	if !strings.Contains(f.stdout, "ANSWERED") {
