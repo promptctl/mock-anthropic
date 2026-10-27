@@ -79,11 +79,15 @@ func Scripts(dirs []string, a account.Account) (script.Script, []string, error) 
 			if err != nil {
 				return script.Script{}, nil, fmt.Errorf("%s: %w", e.File, err)
 			}
-			h, ok := c.(HasKey)
-			if !ok {
-				return script.Script{}, nil, fmt.Errorf("%s: the request has no key: %s", e.File, strings.TrimPrefix(fmt.Sprint(c.Facts()["key"]), "none: "))
+			var id string
+			switch c := c.(type) {
+			case HasKey:
+				id = c.key.ID()
+			case NoKey:
+				return script.Script{}, nil, fmt.Errorf("%s: the request has no key: %s", e.File, c.why)
+			default:
+				return script.Script{}, nil, fmt.Errorf("%s: canonical form of type %T is neither keyed nor not", e.File, c)
 			}
-			id := h.key.ID()
 			if _, dup := byKey[id]; dup {
 				shadowed = append(shadowed, e.File)
 				continue
