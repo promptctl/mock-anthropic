@@ -118,12 +118,13 @@ type harness struct {
 	server      *Server
 	requests    chan RequestEvent
 	connections chan ConnectionEvent
+	servers     chan ServerEvent
 	ca          *x509.CertPool
 }
 
 func start(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{requests: make(chan RequestEvent, 64), connections: make(chan ConnectionEvent, 64)}
+	h := &harness{requests: make(chan RequestEvent, 64), connections: make(chan ConnectionEvent, 64), servers: make(chan ServerEvent, 64)}
 	s, err := Start(Options{Table: table, Handle: dispatch.Dispatch, CertsDir: certsDir, Emit: func(e Event) {
 		if _, err := Line(e); err != nil {
 			t.Errorf("event %+v has no line: %v", e, err)
@@ -133,13 +134,21 @@ func start(t *testing.T) *harness {
 			h.requests <- e
 		case ConnectionEvent:
 			h.connections <- e
+		case ServerEvent:
+			h.servers <- e
 		}
-	}, Log: testLog{t}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
+	}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.server = s
 	t.Cleanup(s.Stop)
+	// A line net/http logs is a mock bug: a test that does not read it fails.
+	t.Cleanup(func() {
+		for len(h.servers) > 0 {
+			t.Errorf("net/http logged: %+v", <-h.servers)
+		}
+	})
 	pem, err := os.ReadFile(s.Certificates().CA.CertPath)
 	if err != nil {
 		t.Fatal(err)
@@ -583,10 +592,22 @@ func TestStopEndsEveryUnitAndSaysSo(t *testing.T) {
 	}
 }
 
-// testLog fails the test on any line net/http logs: none of these tests gives it one.
-type testLog struct{ t *testing.T }
-
-func (l testLog) Write(p []byte) (int, error) {
-	l.t.Errorf("net/http logged: %s", p)
-	return len(p), nil
+// A line net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text.
+func TestNetHTTPLogLineIsAFailedRecord(t *testing.T) {
+	h := start(t)
+	h.server.inner.ErrorLog.Printf("http: superfluous response.WriteHeader call from %s", "here")
+	select {
+	case e := <-h.servers:
+		want := `FAILED {"event":"server","message":"http: superfluous response.WriteHeader call from here","outcome":"failed"}`
+		if got := lineOf(t, e); got != want {
+			t.Errorf("line %s, want %s", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no server record")
+	}
+	select {
+	case e := <-h.servers:
+		t.Errorf("a second record %+v", e)
+	default:
+	}
 }

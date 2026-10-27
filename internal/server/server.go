@@ -32,8 +32,7 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request and one per connection, from many goroutines at once. Log receives each line net/http
-// logs about a response it still answered. Crash receives what fails in the server's own goroutines,
+// request and one per connection, and one per line net/http logs, from many goroutines at once. Crash receives what fails in the server's own goroutines,
 // outside any request: an accept failing before Stop.
 type Options struct {
 	Port     int
@@ -41,7 +40,6 @@ type Options struct {
 	Handle   dispatch.Handler
 	CertsDir string
 	Emit     func(Event)
-	Log      io.Writer
 	Crash    func(error)
 }
 
@@ -96,8 +94,8 @@ var requestLine = regexp.MustCompile(`^([A-Z]+) (\S+) HTTP/1\.[01]\r$`)
 // Start listens and serves until Stop. The leaf certificate covers exactly the hosts the table names,
 // the hosts it accepts CONNECT for: [LAW:one-source-of-truth] both are read from the one table.
 func Start(o Options) (*Server, error) {
-	if o.Emit == nil || o.Log == nil || o.Crash == nil {
-		return nil, errors.New("server options need Emit, Log, and Crash")
+	if o.Emit == nil || o.Crash == nil {
+		return nil, errors.New("server options need Emit and Crash")
 	}
 	certs, err := certificate.Ensure(o.CertsDir, o.Table.Hosts())
 	if err != nil {
@@ -126,8 +124,8 @@ func Start(o Options) (*Server, error) {
 	}
 	s.inner = &http.Server{
 		Handler: s,
-		// [LAW:single-enforcer] net/http's own lines go through the invocation's log, like every record.
-		ErrorLog: log.New(o.Log, "", 0),
+		// [LAW:single-enforcer] net/http's own lines are records, emitted like every other.
+		ErrorLog: log.New(serverLog(o.Emit), "", 0),
 		// net/http is done with a connection, its last handler returned, once it reports it closed.
 		ConnState: func(c net.Conn, state http.ConnState) {
 			if state == http.StateClosed {

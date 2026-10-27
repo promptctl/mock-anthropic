@@ -47,7 +47,6 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 				// one build presents the CA a consumer already trusts.
 				CertsDir: filepath.Join(filepath.Dir(executable), "certs"),
 				Emit:     Sink(stderr, crash),
-				Log:      stderr,
 				Crash:    crash,
 			})
 			if err != nil {
