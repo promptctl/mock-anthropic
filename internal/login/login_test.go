@@ -58,7 +58,8 @@ func TestFilesHoldTheTokenTheAccountAndTheTrustedProjects(t *testing.T) {
 	if err := json.Unmarshal(files[1].Bytes, &top); err != nil || files[1].Name != ConfigFile {
 		t.Fatalf("%s: %v", files[1].Name, err)
 	}
-	if top["hasCompletedOnboarding"] != true {
+	if top["hasCompletedOnboarding"] != true || top["officialMarketplaceAutoInstallAttempted"] != true ||
+		top["officialMarketplaceAutoInstalled"] != true {
 		t.Errorf("config %v", top)
 	}
 	acct := top["oauthAccount"].(map[string]any)
