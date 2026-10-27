@@ -122,10 +122,12 @@ type harness struct {
 	ca          *x509.CertPool
 }
 
-func start(t *testing.T) *harness {
+func start(t *testing.T) *harness { t.Helper(); return startWith(t, dispatch.Dispatch) }
+
+func startWith(t *testing.T, handle dispatch.Handler) *harness {
 	t.Helper()
 	h := &harness{requests: make(chan RequestEvent, 64), connections: make(chan ConnectionEvent, 64), servers: make(chan ServerEvent, 64)}
-	s, err := Start(Options{Table: table, Handle: dispatch.Dispatch, CertsDir: certsDir, Emit: func(e Event) {
+	s, err := Start(Options{Table: table, Handle: handle, CertsDir: certsDir, Emit: func(e Event) {
 		if _, err := Line(e); err != nil {
 			t.Errorf("event %+v has no line: %v", e, err)
 		}
@@ -142,13 +144,14 @@ func start(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	h.server = s
-	t.Cleanup(s.Stop)
-	// A line net/http logs is a mock bug: a test that does not read it fails.
+	// A line net/http logs is a mock bug: a test that does not read it fails. Cleanups run last
+	// first, so this one runs after Stop, once every connection's lines are in.
 	t.Cleanup(func() {
 		for len(h.servers) > 0 {
 			t.Errorf("net/http logged: %+v", <-h.servers)
 		}
 	})
+	t.Cleanup(s.Stop)
 	pem, err := os.ReadFile(s.Certificates().CA.CertPath)
 	if err != nil {
 		t.Fatal(err)
@@ -592,22 +595,21 @@ func TestStopEndsEveryUnitAndSaysSo(t *testing.T) {
 	}
 }
 
-// A line net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text.
+// A line net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text: here
+// net/http refuses a Handler's response that names both Transfer-Encoding and Content-Length.
 func TestNetHTTPLogLineIsAFailedRecord(t *testing.T) {
-	h := start(t)
-	h.server.inner.ErrorLog.Printf("http: superfluous response.WriteHeader call from %s", "here")
+	h := startWith(t, func(ctx context.Context, _ endpoint.Resolution, _ error, r generator.Request) dispatch.Dispatched {
+		header := http.Header{"Transfer-Encoding": {"chunked"}, "Content-Length": {"2"}}
+		return dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Served}, Response: generator.Response{Status: 200, Header: header, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}
+	})
+	do(t, h.plain(), "POST", "http://"+h.addr()+"/v1/ok", nil)
+	h.request(t)
 	select {
 	case e := <-h.servers:
-		want := `FAILED {"event":"server","message":"http: superfluous response.WriteHeader call from here","outcome":"failed"}`
-		if got := lineOf(t, e); got != want {
-			t.Errorf("line %s, want %s", got, want)
+		if line := lineOf(t, e); !strings.HasPrefix(line, `FAILED {"event":"server","message":"http: WriteHeader called with both Transfer-Encoding`) || !strings.HasSuffix(line, `","outcome":"failed"}`) {
+			t.Errorf("line %s", line)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no server record")
-	}
-	select {
-	case e := <-h.servers:
-		t.Errorf("a second record %+v", e)
-	default:
 	}
 }

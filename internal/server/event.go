@@ -10,7 +10,7 @@ import (
 )
 
 // [LAW:nothing-unseen] One record per unit of work: each request and each connection, the plain ones,
-// the tunnels and the refused ones alike.
+// the tunnels and the refused ones alike; and one per line net/http logs, which no unit of ours owns.
 
 // Event is a RequestEvent, a ConnectionEvent, or a ServerEvent.
 type Event interface{ outcome() string }
@@ -83,22 +83,27 @@ type ConnectionEvent struct {
 
 func (e ConnectionEvent) outcome() string { return string(e.Outcome) }
 
-// ServerEvent is a line net/http logs about the mock's own handling, such as a superfluous
-// WriteHeader: a mock bug, so it is always failed.
-type ServerEvent struct {
-	Event   string `json:"event"`
-	Message string `json:"message"`
-	Outcome string `json:"outcome"`
-}
+// ServerEvent is a line net/http logs about the mock's own handling, such as a response header it
+// refuses: a mock bug. [LAW:types-are-the-program] Its event and outcome are fixed, not fields, so no
+// ServerEvent can be written as anything but FAILED.
+type ServerEvent struct{ Message string }
 
-func (e ServerEvent) outcome() string { return e.Outcome }
+func (e ServerEvent) outcome() string { return string(dispatch.Failed) }
+
+func (e ServerEvent) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Event   string `json:"event"`
+		Message string `json:"message"`
+		Outcome string `json:"outcome"`
+	}{"server", e.Message, e.outcome()})
+}
 
 // serverLog is the writer net/http logs to. log.Logger writes each line in one Write, so each Write
 // is one record. [LAW:no-silent-failure] A record that cannot be written reaches Emit's own crash path.
 type serverLog func(Event)
 
 func (emit serverLog) Write(p []byte) (int, error) {
-	emit(ServerEvent{Event: "server", Message: strings.TrimSuffix(string(p), "\n"), Outcome: "failed"})
+	emit(ServerEvent{Message: strings.TrimSuffix(string(p), "\n")})
 	return len(p), nil
 }
 

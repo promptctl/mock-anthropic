@@ -32,8 +32,9 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request and one per connection, and one per line net/http logs, from many goroutines at once. Crash receives what fails in the server's own goroutines,
-// outside any request: an accept failing before Stop.
+// request, one per connection, and one per line net/http logs, from many goroutines at once. Crash
+// receives what fails in the server's own goroutines, outside any request: an accept failing before
+// Stop.
 type Options struct {
 	Port     int
 	Table    *endpoint.Table
