@@ -148,7 +148,7 @@ func configDirectory(path string) (bool, error) {
 	case !errors.Is(err, fs.ErrNotExist):
 		return false, err
 	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		// EEXIST: a dangling symlink, which Stat reads as absent and MkdirAll cannot replace.
 		if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrExist) {
 			return false, notDirectory

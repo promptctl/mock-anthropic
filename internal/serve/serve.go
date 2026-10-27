@@ -137,6 +137,8 @@ func parse(args []string) (config, error) {
 		c.port = n
 	}
 	for _, dir := range scenarios {
+		// Scripts are read per request, so one written after the start still answers; the directory
+		// itself must exist at the start.
 		path, err := cmdline.Directory("--scenarios", dir)
 		if err != nil {
 			return config{}, err
