@@ -1,9 +1,17 @@
 package serve
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 	"github.com/promptctl/mock-anthropic/internal/server"
@@ -39,5 +47,46 @@ func TestSinkWritesOneLinePerRecord(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
 	if len(lines) != 2 || !strings.HasPrefix(lines[0], "REFUSED {") || !strings.HasPrefix(lines[1], "CLOSED {") {
 		t.Errorf("lines %q", lines)
+	}
+}
+
+func TestServeAnswersAsTheAccountItWasGiven(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "account.json")
+	const org = "00000000-0000-4000-8000-0000000000bb"
+	err := os.WriteFile(file, []byte(`{"accountUuid":"00000000-0000-4000-8000-0000000000aa","emailAddress":"given@example.invalid",`+
+		`"organizationUuid":"`+org+`","organizationName":"Given Org","subscriptionType":"pro"}`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Command(write, command.NewLog(&stderr)).Run(ctx, []string{"--port", "0", "--account", file}, func(err error) { t.Errorf("crash: %v", err) }, func(command.Facts) {})
+		write.Close()
+		done <- err
+	}()
+	var ready struct{ Port int }
+	if err := json.NewDecoder(read).Decode(&ready); err != nil {
+		stop()
+		t.Fatalf("no ready line: %v (%s)", err, stderr.String())
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/api/oauth/organizations/%s/plugins/list-plugins", ready.Port, org))
+	if err != nil {
+		stop()
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	stop()
+	if err := <-done; err != nil {
+		t.Errorf("serve ended with %v", err)
+	}
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"plugins":[]`) {
+		t.Errorf("%d %s: the given account's organization was not answered", resp.StatusCode, body)
 	}
 }

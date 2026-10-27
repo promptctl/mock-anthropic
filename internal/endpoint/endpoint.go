@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/generator"
 )
 
@@ -108,8 +109,8 @@ type Table struct {
 	hosts     []string
 }
 
-// Default is the mock's endpoint table.
-var Default = mustBuild(rows)
+// For is the mock's endpoint table answering as a: the one owner of the table `serve` and `coverage` use.
+func For(a account.Account) *Table { return mustBuild(Rows(a)) }
 
 func mustBuild(rows []Row) *Table {
 	t, err := Build(rows)
