@@ -41,7 +41,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			}
 			s, err := server.Start(server.Options{
 				Port:   c.port,
-				Table:  endpoint.Default,
+				Table:  endpoint.For(c.account),
 				Handle: dispatch.Dispatch,
 				// Beside the binary: built at the repository root, the gitignored /certs/, so every run of
 				// one build presents the CA a consumer already trusts.
@@ -106,7 +106,7 @@ type config struct {
 	port        int
 	scenarios   []string
 	accountFile *string         // nil: the default account
-	account     account.Account // checked now; the generators that answer with it are later work
+	account     account.Account // checked now; the endpoint table answers as it
 }
 
 var portText = regexp.MustCompile(`^\d{1,5}$`)
