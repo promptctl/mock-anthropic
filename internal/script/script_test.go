@@ -295,7 +295,7 @@ func TestAMalformedScriptFailsNamingItsPath(t *testing.T) {
 		"tool input that is not an object": {m{"reply": tool("ls", "Bash")}, "reply: content[0]: input"},
 		"a tool call with no name":         {m{"reply": tool(m{}, "")}, "reply: content[0]: name"},
 		"a tool name the API refuses":      {m{"reply": tool(m{}, "my tool")}, "reply: content[0]: name"},
-		"a tool name of 65 characters":    {m{"reply": tool(m{}, strings.Repeat("a", 65))}, "reply: content[0]: name"},
+		"a tool name of 65 characters":     {m{"reply": tool(m{}, strings.Repeat("a", 65))}, "reply: content[0]: name"},
 		"the first of two bad keys":        {m{"reply": msg(m{"b": 1, "a": 1})}, `Unrecognized key: "a"`},
 	}
 	for what, c := range bad {
