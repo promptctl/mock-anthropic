@@ -92,6 +92,12 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("statusless", endpoint.API, "GET", "/v1/statusless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Response{Header: http.Header{}, Body: strings.NewReader("")}, Facts: generator.Facts{}}, nil
 		}),
+		endpoint.InScope("framed", endpoint.API, "GET", "/v1/framed", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"transfer-encoding": {"chunked"}, "content-length": {"2"}}, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("badlength", endpoint.API, "GET", "/v1/badlength", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"Content-Length": {"two"}}, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}, nil
+		}),
 		endpoint.InScope("reasonless", endpoint.API, "GET", "/v1/reasonless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Declined{}, Facts: generator.Facts{}}, nil
 		}),
@@ -314,10 +320,12 @@ func TestAFailingGeneratorGetsA500NamingIt(t *testing.T) {
 		"/v1/panics":     "generator panics panicked: kaboom",
 		"/v1/bodiless":   "the handler gave a response with no body",
 		"/v1/statusless": "the handler gave status 0, not a final HTTP status",
+		"/v1/framed":     "the handler gave both Transfer-Encoding and Content-Length",
+		"/v1/badlength":  "the handler gave Content-Length \"two\", not a length",
 		"/v1/reasonless": "generator reasonless declined without saying why",
 	} {
 		res, body := do(t, c, "GET", "https://api.anthropic.com"+path, nil)
-		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, "mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why) {
+		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, strings.ReplaceAll("mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why, `"`, `\"`)) {
 			t.Errorf("%s: got %d %s", path, res.StatusCode, body)
 		}
 		if r := h.request(t); !strings.HasPrefix(lineOf(t, r), "FAILED {") || r.Why != why || *r.Status != 500 {
@@ -595,19 +603,17 @@ func TestStopEndsEveryUnitAndSaysSo(t *testing.T) {
 	}
 }
 
-// A line net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text: here
-// net/http refuses a Handler's response that names both Transfer-Encoding and Content-Length.
+// A message net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text.
+// unwritable refuses every response net/http would log about, and ServeHTTP recovers every panic, so
+// no request provokes one: the test logs through the server's own ErrorLog.
 func TestNetHTTPLogLineIsAFailedRecord(t *testing.T) {
-	h := startWith(t, func(ctx context.Context, _ endpoint.Resolution, _ error, r generator.Request) dispatch.Dispatched {
-		header := http.Header{"Transfer-Encoding": {"chunked"}, "Content-Length": {"2"}}
-		return dispatch.Dispatched{Verdict: dispatch.Verdict{Outcome: dispatch.Served}, Response: generator.Response{Status: 200, Header: header, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}
-	})
-	do(t, h.plain(), "POST", "http://"+h.addr()+"/v1/ok", nil)
-	h.request(t)
+	h := start(t)
+	h.server.inner.ErrorLog.Printf("http: panic serving %s: %s\n%s", "127.0.0.1:1", "kaboom", "goroutine 1 [running]:")
 	select {
 	case e := <-h.servers:
-		if line := lineOf(t, e); !strings.HasPrefix(line, `FAILED {"event":"server","message":"http: WriteHeader called with both Transfer-Encoding`) || !strings.HasSuffix(line, `","outcome":"failed"}`) {
-			t.Errorf("line %s", line)
+		want := `FAILED {"event":"server","message":"http: panic serving 127.0.0.1:1: kaboom\ngoroutine 1 [running]:","outcome":"failed"}`
+		if got := lineOf(t, e); got != want {
+			t.Errorf("line %s, want %s", got, want)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no server record")

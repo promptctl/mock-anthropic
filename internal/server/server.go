@@ -32,7 +32,7 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request, one per connection, and one per line net/http logs, from many goroutines at once. Crash
+// request, one per connection, and one per message net/http logs, from many goroutines at once. Crash
 // receives what fails in the server's own goroutines, outside any request: an accept failing before
 // Stop.
 type Options struct {
@@ -457,13 +457,28 @@ func parsePort(text string) (int, bool) {
 	return n, n <= 65535
 }
 
-// unwritable is why a response cannot be written, or "": a status that is not a final one, or no body.
+// unwritable is why a response cannot be written, or "": a status that is not a final one, no body, or
+// framing headers net/http would rewrite, logging it, so the client would get another response than
+// the handler gave.
 func unwritable(r generator.Response) string {
+	// Canonical keys, as writeHeader sends them.
+	header := http.Header{}
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			header.Add(k, v)
+		}
+	}
+	length := header.Get("Content-Length")
+	_, lengthErr := strconv.ParseUint(length, 10, 63)
 	switch {
 	case r.Status < 200 || r.Status > 999:
 		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
 	case r.Body == nil:
 		return "a response with no body"
+	case length != "" && header.Get("Transfer-Encoding") != "":
+		return "both Transfer-Encoding and Content-Length"
+	case length != "" && lengthErr != nil:
+		return fmt.Sprintf("Content-Length %q, not a length", length)
 	}
 	return ""
 }
