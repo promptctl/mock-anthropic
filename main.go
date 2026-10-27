@@ -5,11 +5,17 @@ import (
 	"os"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
+	"github.com/promptctl/mock-anthropic/internal/serve"
 )
 
+// stderr is the invocation's one stderr, shared by the dispatcher and every command's records.
+var stderr = command.NewLog(os.Stderr)
+
 // Commands is every command the mock answers to; each later command registers here.
-var Commands = command.Commands{}
+var Commands = command.Commands{
+	"serve": serve.Command(os.Stdout, stderr),
+}
 
 func main() {
-	os.Exit(command.Main(Commands, os.Args[1:], os.Stderr, command.Notify()))
+	os.Exit(command.Main(Commands, os.Args[1:], stderr, command.Notify()))
 }

@@ -18,7 +18,7 @@ import (
 func run(t *testing.T, commands Commands, argv []string, signals <-chan os.Signal) (int, map[string]any, []string) {
 	t.Helper()
 	var stderr bytes.Buffer
-	exit := Main(commands, argv, &stderr, signals)
+	exit := Main(commands, argv, NewLog(&stderr), signals)
 	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
 	last := lines[len(lines)-1]
 	head, body, _ := strings.Cut(last, " ")
@@ -44,7 +44,7 @@ func expect(t *testing.T, record map[string]any, want map[string]any) {
 }
 
 func task(run func(ctx context.Context, args []string) (Result, error)) Commands {
-	return Commands{"stand_in": {Kind: Task, Run: run}}
+	return Commands{"stand_in": {Kind: Task, Run: func(ctx context.Context, args []string, _ func(error)) (Result, error) { return run(ctx, args) }}}
 }
 
 func TestWrongCommandLine(t *testing.T) {
@@ -171,7 +171,7 @@ func TestSignalEndsATaskAtOnce(t *testing.T) {
 
 func TestServiceStopsOnASignal(t *testing.T) {
 	signals := make(chan os.Signal, 1)
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error)) (Result, error) {
 		signals <- syscall.SIGTERM
 		<-ctx.Done()
 		return Result{Answer: OK, Facts: Facts{"stopped": "cleanly"}}, nil
@@ -185,7 +185,7 @@ func TestServiceStopsOnASignal(t *testing.T) {
 
 func TestSecondSignalEndsAStoppingService(t *testing.T) {
 	signals := make(chan os.Signal, 2)
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error)) (Result, error) {
 		signals <- syscall.SIGINT
 		<-ctx.Done()
 		signals <- syscall.SIGINT
@@ -199,11 +199,63 @@ func TestSecondSignalEndsAStoppingService(t *testing.T) {
 }
 
 func TestCommandWithNoKindFails(t *testing.T) {
-	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string) (Result, error) {
+	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string, func(error)) (Result, error) {
 		return Result{Answer: OK}, nil
 	}}}, []string{"stand_in"}, nil)
 	if exit != 1 {
 		t.Errorf("exit %d, want 1", exit)
 	}
 	expect(t, record, map[string]any{"outcome": "failed", "why": "command stand_in is registered with no Kind"})
+}
+
+func TestReportedCrashStopsAServiceAndKeepsItsFacts(t *testing.T) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+		go crash(errors.New("a sink broke"))
+		<-ctx.Done()
+		return Result{Answer: OK, Facts: Facts{"port": 1}}, nil
+	}}}
+	exit, record, _ := run(t, service, []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke", "facts": map[string]any{"port": 1}})
+}
+
+func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
+	commands := Commands{"stand_in": {Kind: Task, Run: func(_ context.Context, _ []string, crash func(error)) (Result, error) {
+		crash(errors.New("a sink broke"))
+		select {}
+	}}}
+	exit, record, _ := run(t, commands, []string{"stand_in"}, nil)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke", "facts": map[string]any{}})
+}
+
+func TestSignalWhileACrashedServiceStopsEndsItAtOnce(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+		crash(errors.New("a sink broke"))
+		<-ctx.Done()
+		signals <- syscall.SIGTERM
+		select {}
+	}}}
+	exit, record, _ := run(t, service, []string{"stand_in"}, signals)
+	if exit != 1 {
+		t.Errorf("exit %d, want 1", exit)
+	}
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke\nSIGTERM while the command was ending"})
+}
+
+func TestNothingFollowsTheRecord(t *testing.T) {
+	var stderr bytes.Buffer
+	log := NewLog(&stderr)
+	Main(task(func(context.Context, []string) (Result, error) { return Result{Answer: OK}, nil }), []string{"stand_in"}, log, nil)
+	if _, err := log.Write([]byte("late\n")); !errors.Is(err, ErrEnded) {
+		t.Errorf("write after the record: %v, want ErrEnded", err)
+	}
+	if strings.Contains(stderr.String(), "late") {
+		t.Errorf("a line followed the record: %q", stderr.String())
+	}
 }

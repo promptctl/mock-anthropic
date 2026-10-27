@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -52,8 +53,11 @@ const (
 type Command struct {
 	Kind  Kind
 	Usage string
-	// Run returns a UsageError for a wrong command line; any other error fails the invocation.
-	Run func(ctx context.Context, args []string) (Result, error)
+	// Run returns a UsageError for a wrong command line; any other error fails the invocation. crash
+	// is how work Run starts outside its own goroutine reports an error nobody caught there: it ends
+	// the invocation as a crash, as a panic in Run does, except that a Service is first stopped, so
+	// what it learned stays on the record.
+	Run func(ctx context.Context, args []string, crash func(error)) (Result, error)
 }
 
 type Commands map[string]Command
@@ -76,7 +80,8 @@ func Notify() <-chan os.Signal {
 }
 
 // Record is the one record of an invocation. EndedBy is the signal that first asked it to end, "crash"
-// for a panic nobody recovered or a Run that never returned, or nil when its command finished by itself.
+// for a panic nobody recovered, a Run that never returned, or an error reported through crash, or nil
+// when its command finished by itself.
 type Record struct {
 	Event      string   `json:"event"`
 	Argv       []string `json:"argv"`
@@ -101,9 +106,40 @@ func ExitCode(outcome Outcome) int {
 	}
 }
 
+// Log is an invocation's stderr. [LAW:single-enforcer] Every line the invocation writes, its command's
+// records included, goes through it whole, one at a time, and the invocation's record is the last:
+// once it is out, a write fails with ErrEnded. A record still waiting when a second signal ends the
+// invocation at once is one of those, and the invocation's record says so.
+type Log struct {
+	mu    sync.Mutex
+	w     io.Writer
+	ended bool
+}
+
+// ErrEnded is a write to a Log after the invocation's record.
+var ErrEnded = errors.New("the invocation has ended; its record is written")
+
+func NewLog(w io.Writer) *Log { return &Log{w: w} }
+
+func (l *Log) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ended {
+		return 0, ErrEnded
+	}
+	return l.w.Write(p)
+}
+
+func (l *Log) end(line string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ended = true
+	fmt.Fprintln(l.w, line)
+}
+
 // Main runs argv's command and writes the invocation's one record on stderr, however it ends, returning
 // the exit code that record carries. signals delivers the Signals as they arrive.
-func Main(commands Commands, argv []string, stderr io.Writer, signals <-chan os.Signal) int {
+func Main(commands Commands, argv []string, stderr *Log, signals <-chan os.Signal) int {
 	started := time.Now()
 	ending, ends := invoke(commands, argv, stderr, signals)
 	record := Record{
@@ -131,7 +167,7 @@ func Main(commands Commands, argv []string, stderr io.Writer, signals <-chan os.
 		record.Outcome, record.Exit, record.Why, record.Facts = Failed, ExitCode(Failed), strings.Join(why, "\n"), Facts{}
 		line, _ = json.Marshal(record)
 	}
-	fmt.Fprintf(stderr, "%s %s\n", strings.ToUpper(string(record.Outcome)), line)
+	stderr.end(strings.ToUpper(string(record.Outcome)) + " " + string(line))
 	return record.Exit
 }
 
@@ -141,7 +177,7 @@ type ending struct {
 	Facts   Facts
 }
 
-// end is one thing that asked the invocation to end: a signal by name, or "crash" with its panic.
+// end is one thing that asked the invocation to end: a signal by name, or "crash" with what crashed.
 type end struct {
 	name  string
 	crash string
@@ -166,6 +202,16 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// [LAW:single-enforcer] A reported crash is one more end on this loop, never a second way out.
+	crashes := make(chan error)
+	ended := make(chan struct{})
+	defer close(ended)
+	crash := func(err error) {
+		select {
+		case crashes <- err:
+		case <-ended: // the invocation has its record already; nothing is left to end
+		}
+	}
 	done := make(chan settled, 1)
 	go func() {
 		returned := false
@@ -176,7 +222,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 				done <- settled{crash: "the command exited without returning (runtime.Goexit)"}
 			}
 		}()
-		result, err := cmd.Run(ctx, argv[1:])
+		result, err := cmd.Run(ctx, argv[1:], crash)
 		returned = true
 		done <- settled{result: result, err: err}
 	}()
@@ -196,6 +242,12 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			if cmd.Kind == Task || len(ends) > 1 {
 				return failed(ends, nil, Facts{}), ends
 			}
+		case err := <-crashes:
+			ends = append(ends, end{name: "crash", crash: err.Error()})
+			cancel()
+			if cmd.Kind == Task || len(ends) > 1 {
+				return failed(ends, nil, Facts{}), ends
+			}
 		case s := <-done:
 			if s.crash != "" {
 				ends = append(ends, end{name: "crash", crash: s.crash})
@@ -205,7 +257,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			switch {
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
-			case s.err != nil:
+			case s.err != nil || crashed(ends):
 				return failed(ends, s.err, s.result.Facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
 				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
@@ -213,6 +265,15 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			return ending{Outcome: s.result.Answer, Facts: s.result.Facts}, ends
 		}
 	}
+}
+
+func crashed(ends []end) bool {
+	for _, e := range ends {
+		if e.name == "crash" {
+			return true
+		}
+	}
+	return false
 }
 
 // failed tells every end, in order: the first asked the command to finish, every later one came while
