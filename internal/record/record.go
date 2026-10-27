@@ -174,7 +174,7 @@ func (t *tee) Close() error {
 		return nil // the server already failed the request for the broken body
 	case !t.finished:
 		t.rc.Totals.Skipped.Add(1)
-		t.facts["recording"] = map[string]any{"skipped": "client abandoned the response"}
+		t.facts["recording"] = map[string]any{"skipped": "the response was not read to its end"}
 		return nil
 	}
 	file, counts, err := t.save()

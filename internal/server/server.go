@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -692,10 +693,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d = dispatch.Refuse(req, plainOnly, generator.Facts{})
 	default:
 		d = s.handle(r.Context(), resolution, miss, req)
-		// [LAW:no-ambient-temporal-coupling] From here every path out records the request, and the record
-		// closes the handler's body first: the one signal that the body is over, however it ended.
-		rec.closer, _ = d.Response.Body.(io.Closer)
 	}
+	// [LAW:no-ambient-temporal-coupling] From here every path out records the request, and the record
+	// closes the handler's body first: the one signal that the body is over, however it ended.
+	rec.closer, _ = d.Response.Body.(io.Closer)
 	if r.Context().Err() != nil {
 		rec.record(nil, d.Facts, Aborted, endedEarly(sc.client.endedBy(), notReady))
 		panic(http.ErrAbortHandler)
@@ -790,7 +791,9 @@ func (q *request) record(status *int, facts generator.Facts, outcome RequestOutc
 	if c := q.closer; c != nil {
 		q.closer = nil
 		if err := c.Close(); err != nil {
-			outcome, why = RequestFailed, fmt.Sprintf("closing the response body: %v", err)
+			// The cause already on the record stays beside the close failure.
+			closing := fmt.Sprintf("closing the response body: %v", err)
+			outcome, why = RequestFailed, strings.Join(slices.DeleteFunc([]string{why, closing}, func(x string) bool { return x == "" }), "; ")
 		}
 	}
 	q.event.Status, q.event.Outcome, q.event.Why = status, outcome, why

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
@@ -148,6 +149,7 @@ var table = func() *endpoint.Table {
 			<-ctx.Done()
 			return closing(2, func(context.Context, generator.Facts) io.Reader { return strings.NewReader("never read") }, nil)(ctx, p, r)
 		}),
+		endpoint.InScope("closes-after-failure", endpoint.API, "GET", "/v1/closes-after-failure", closing(3, func(context.Context, generator.Facts) io.Reader { return iotest.ErrReader(errors.New("cut")) }, errors.New("save failed"))),
 		endpoint.InScope("closes-badly", endpoint.API, "GET", "/v1/closes-badly", closing(3, func(context.Context, generator.Facts) io.Reader { return strings.NewReader("whole") }, errors.New("save failed"))),
 		endpoint.InScope("bare", endpoint.API, "GET", "/v1/bare", nil),
 		endpoint.OutOfScope("out", endpoint.API, "GET", "/v1/out", "remote sessions"),
@@ -691,6 +693,17 @@ func TestACloseThatFailsFailsTheRequest(t *testing.T) {
 	h := start(t)
 	do(t, h.proxied(), "GET", "https://api.anthropic.com/v1/closes-badly", nil)
 	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "closing the response body: save failed" || r.Facts["closed"] != true {
+		t.Errorf("record %+v", r)
+	}
+}
+
+func TestACloseThatFailsKeepsTheCauseAlreadyOnTheRecord(t *testing.T) {
+	h := start(t)
+	if res, err := h.proxied().Get("https://api.anthropic.com/v1/closes-after-failure"); err == nil { // the cut connection may fail the client's read
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}
+	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "response body failed: cut; closing the response body: save failed" {
 		t.Errorf("record %+v", r)
 	}
 }
