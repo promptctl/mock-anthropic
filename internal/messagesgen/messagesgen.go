@@ -5,6 +5,7 @@ package messagesgen
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 
@@ -18,7 +19,7 @@ import (
 // be read or is not a script is an error out of script.InOrder, which dispatch turns into the 500 and
 // FAILED line naming its path, on every Messages request (PROJECT.md "A bad script").
 func New(dirs []string, builtIns []script.Script) generator.Func {
-	seen := &occurrences{count: map[string]int{}}
+	seen := &occurrences{count: map[[sha256.Size]byte]int{}}
 	return func(ctx context.Context, _ map[string]string, r generator.Request) (generator.Answer, error) {
 		scripts, err := script.InOrder(dirs, builtIns)
 		if err != nil {
@@ -54,13 +55,14 @@ func New(dirs []string, builtIns []script.Script) generator.Func {
 // request sequence still reproduces.
 type occurrences struct {
 	mu    sync.Mutex
-	count map[string]int
+	count map[[sha256.Size]byte]int
 }
 
 func (o *occurrences) next(body string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	n := o.count[body]
-	o.count[body] = n + 1
+	key := sha256.Sum256([]byte(body))
+	n := o.count[key]
+	o.count[key] = n + 1
 	return n
 }

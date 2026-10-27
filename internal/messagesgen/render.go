@@ -32,7 +32,7 @@ func render(ctx context.Context, reply script.Reply, request messages.Request, s
 	case script.MessageReply:
 		m := assistantMessage(reply, request, seen.next(request.Raw))
 		if !request.Stream {
-			body, err := json.Marshal(m.message)
+			body, err := marshal(m.message)
 			if err != nil {
 				return generator.Response{}, nil, err
 			}
@@ -150,12 +150,13 @@ func blockPart(b script.Block, requestDigest string, index int) part {
 			delta: func(c string) map[string]any { return map[string]any{"type": "text_delta", "text": c} },
 		}
 	case script.ToolUse:
-		// The script parser accepted the input as a JSON object, so it marshals. [LAW:one-source-of-truth]
-		// Marshaling is what the whole message does to the input; the deltas carry those same bytes.
-		input, err := json.Marshal(b.Input)
-		if err != nil {
-			panic(fmt.Sprintf("a tool input the script parser accepted does not marshal: %v", err))
+		// The script parser accepted the input as a JSON object, so it compacts. The whole message
+		// is marshaled without HTML escaping, so these bytes are what it carries and what the deltas carry.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, b.Input); err != nil {
+			panic(fmt.Sprintf("a tool input the script parser accepted does not compact: %v", err))
 		}
+		input := compact.Bytes()
 		id := "toolu_" + digest(requestDigest, "tool_use", fmt.Sprint(index))[:idHex]
 		return part{
 			whole: toolUseBlock{"tool_use", id, b.Name, json.RawMessage(input)},
@@ -190,6 +191,18 @@ func chunks(text string) []string {
 	return out
 }
 
+// marshal is JSON as the API writes it: `<`, `>` and `&` literal, not escaped, so a tool input reaches the
+// client as the bytes the script wrote.
+func marshal(v any) ([]byte, error) {
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
+}
+
 // frames is [LAW:one-source-of-truth] the stream derived from the message the JSON reply would be, so a
 // client that accumulates the deltas builds that same message. The events and their order are the API's.
 func (a assistant) frames() ([][]byte, error) {
@@ -217,7 +230,7 @@ func (a assistant) frames() ([][]byte, error) {
 	)
 	frames := make([][]byte, len(events))
 	for i, e := range events {
-		data, err := json.Marshal(e)
+		data, err := marshal(e)
 		if err != nil {
 			return nil, err
 		}

@@ -462,4 +462,7 @@ func TestAToolInputIsTheSameBytesStreamedAndWhole(t *testing.T) {
 	if string(m.Content[0].Input) != streamed {
 		t.Errorf("whole %s, streamed %s", m.Content[0].Input, streamed)
 	}
+	if want := `{"cmd":"a<b && c"}`; string(m.Content[0].Input) != want {
+		t.Errorf("input %s, want the script's bytes %s", m.Content[0].Input, want)
+	}
 }
