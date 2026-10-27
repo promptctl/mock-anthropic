@@ -40,7 +40,11 @@ func IsSyntheticUUID(s string) bool { return syntheticForm.MatchString(s) }
 
 // uuidShape is anything that could be a real identifier: 8-4-4-4-12 hex in either case, of any
 // version or variant. Wider than uuidForm on purpose; a scan must not miss what a parser refuses.
-var uuidShape = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+var uuidShape = regexp.MustCompile(`(?i)` + UUIDPattern)
+
+// UUIDPattern is the shape of anything that could be a UUID, for a regular expression that must find one
+// in context.
+const UUIDPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
 
 // ForeignUUIDs returns the byte offset of every UUID-shaped string in data that IsSyntheticUUID does
 // not recognize. Offsets, not values: a caller reporting a hit must not copy a real identifier onward.
@@ -60,6 +64,17 @@ func ForeignUUIDs(data []byte) []int {
 		at = start + 1
 	}
 	return foreign
+}
+
+// MapForeignUUIDs returns text with every UUID-shaped string that IsSyntheticUUID does not recognize
+// replaced by replace(uuid). Same shape as ForeignUUIDs, so what one finds the other rewrites.
+func MapForeignUUIDs(text string, replace func(uuid string) string) string {
+	return uuidShape.ReplaceAllStringFunc(text, func(u string) string {
+		if syntheticForm.MatchString(u) {
+			return u
+		}
+		return replace(u)
+	})
 }
 
 // SubscriptionType is the plan the account is on.

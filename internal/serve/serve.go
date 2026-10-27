@@ -30,57 +30,62 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			if err != nil {
 				return command.Result{}, err
 			}
-			executable, err := os.Executable()
-			if err == nil {
-				// The build itself, not a symlink to it, so every way of reaching one build finds one CA.
-				executable, err = filepath.EvalSymlinks(executable)
-			}
-			if err != nil {
-				return command.Result{}, fmt.Errorf("finding the certificates directory: %w", err)
-			}
-			s, err := server.Start(server.Options{
+			return Launch(ctx, stdout, stderr, crash, learn, server.Options{
 				Port:   c.port,
 				Table:  endpoint.For(c.account, c.scenarios),
 				Handle: dispatch.Dispatch,
-				// Beside the binary: built at the repository root, the gitignored /certs/, so every run of
-				// one build presents the CA a consumer already trusts.
-				CertsDir: filepath.Join(filepath.Dir(executable), "certs"),
-				Emit:     Sink(stderr, crash),
-				Crash:    crash,
-			})
-			if err != nil {
-				return command.Result{}, err
-			}
-			certs := s.Certificates()
-			// [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
-			// from. What ended the run is the dispatcher's to record. Learned before serving, so a second
-			// signal at any point after this still finds them on the record. The dispatcher keeps what was
-			// learned on every ending.
-			facts := command.Facts{
-				"port":         s.Port(),
-				"ca":           certs.CA.CertPath,
+			}, command.Facts{
 				"account_file": c.accountFile,
 				"scenarios":    c.scenarios,
-				"certificates": map[string]string{"ca": string(certs.CA.Outcome), "leaf": string(certs.Leaf.Outcome)},
-			}
-			learn(facts)
-			ready, err := json.Marshal(struct {
-				Port int    `json:"port"`
-				CA   string `json:"ca"`
-			}{s.Port(), certs.CA.CertPath})
-			if err == nil {
-				_, err = fmt.Fprintf(stdout, "%s\n", ready)
-			}
-			if err != nil {
-				// A consumer that never reads the ready line cannot find the mock; nothing is left to serve.
-				s.Stop()
-				return command.Result{}, fmt.Errorf("writing the ready line: %w", err)
-			}
-			<-ctx.Done()
-			s.Stop()
-			return command.Result{Answer: command.OK}, nil
+			})
 		},
 	}
+}
+
+// Launch is what every command that runs the mock shares: start the server from o (Port, Table and
+// Handle are the caller's; the certificates directory, the records and the crash path are Launch's),
+// learn the facts of the start, announce it on stdout, and serve until ctx ends. facts are the
+// caller's, learned beside the port and the certificates.
+func Launch(ctx context.Context, stdout io.Writer, stderr *command.Log, crash func(error), learn func(command.Facts), o server.Options, facts command.Facts) (command.Result, error) {
+	executable, err := os.Executable()
+	if err == nil {
+		// The build itself, not a symlink to it, so every way of reaching one build finds one CA.
+		executable, err = filepath.EvalSymlinks(executable)
+	}
+	if err != nil {
+		return command.Result{}, fmt.Errorf("finding the certificates directory: %w", err)
+	}
+	// Beside the binary: built at the repository root, the gitignored /certs/, so every run of one
+	// build presents the CA a consumer already trusts.
+	o.CertsDir = filepath.Join(filepath.Dir(executable), "certs")
+	o.Emit, o.Crash = Sink(stderr, crash), crash
+	s, err := server.Start(o)
+	if err != nil {
+		return command.Result{}, err
+	}
+	certs := s.Certificates()
+	// [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
+	// from. What ended the run is the dispatcher's to record. Learned before serving, so a second
+	// signal at any point after this still finds them on the record. The dispatcher keeps what was
+	// learned on every ending.
+	facts["port"], facts["ca"] = s.Port(), certs.CA.CertPath
+	facts["certificates"] = map[string]string{"ca": string(certs.CA.Outcome), "leaf": string(certs.Leaf.Outcome)}
+	learn(facts)
+	ready, err := json.Marshal(struct {
+		Port int    `json:"port"`
+		CA   string `json:"ca"`
+	}{s.Port(), certs.CA.CertPath})
+	if err == nil {
+		_, err = fmt.Fprintf(stdout, "%s\n", ready)
+	}
+	if err != nil {
+		// A consumer that never reads the ready line cannot find the mock; nothing is left to serve.
+		s.Stop()
+		return command.Result{}, fmt.Errorf("writing the ready line: %w", err)
+	}
+	<-ctx.Done()
+	s.Stop()
+	return command.Result{Answer: command.OK}, nil
 }
 
 // Sink writes each record as its line on the invocation's log, from any goroutine.

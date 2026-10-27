@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
@@ -73,6 +75,30 @@ func streaming(next func(context.Context) error) generator.Func {
 	}
 }
 
+// closes is a response body that is also an io.Closer: it counts its closes and adds to the request's
+// facts as it ends, the way a recorder finalizes.
+type closes struct {
+	io.Reader
+	facts generator.Facts
+	count *atomic.Int32
+	err   error
+}
+
+func (c *closes) Close() error {
+	c.count.Add(1)
+	c.facts["closed"] = true
+	return c.err
+}
+
+var closeCounts [4]atomic.Int32
+
+func closing(i int, body func(ctx context.Context, facts generator.Facts) io.Reader, err error) generator.Func {
+	return func(ctx context.Context, _ map[string]string, _ generator.Request) (generator.Answer, error) {
+		facts := generator.Facts{}
+		return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{}, Body: &closes{Reader: body(ctx, facts), facts: facts, count: &closeCounts[i], err: err}}, Facts: facts}, nil
+	}
+}
+
 var table = func() *endpoint.Table {
 	t, err := endpoint.Build([]endpoint.Row{
 		endpoint.InScope("ok", endpoint.API, "POST", "/v1/ok", answerJSON),
@@ -114,6 +140,17 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("breaks", endpoint.API, "GET", "/v1/breaks", streaming(func(context.Context) error { return errors.New("source broke") })),
 		endpoint.InScope("stalls", endpoint.API, "GET", "/v1/stalls", streaming(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })),
 		endpoint.InScope("waits", endpoint.API, "POST", "/v1/waits", waitsForCtx),
+		endpoint.InScope("closes-whole", endpoint.API, "GET", "/v1/closes-whole", closing(0, func(context.Context, generator.Facts) io.Reader { return strings.NewReader("whole") }, nil)),
+		endpoint.InScope("closes-abandoned", endpoint.API, "GET", "/v1/closes-abandoned", closing(1, func(ctx context.Context, _ generator.Facts) io.Reader {
+			return &streams{ctx: ctx, next: func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }}
+		}, nil)),
+		endpoint.InScope("closes-unread", endpoint.API, "POST", "/v1/closes-unread", func(ctx context.Context, p map[string]string, r generator.Request) (generator.Answer, error) {
+			reached <- struct{}{}
+			<-ctx.Done()
+			return closing(2, func(context.Context, generator.Facts) io.Reader { return strings.NewReader("never read") }, nil)(ctx, p, r)
+		}),
+		endpoint.InScope("closes-after-failure", endpoint.API, "GET", "/v1/closes-after-failure", closing(3, func(context.Context, generator.Facts) io.Reader { return iotest.ErrReader(errors.New("cut")) }, errors.New("save failed"))),
+		endpoint.InScope("closes-badly", endpoint.API, "GET", "/v1/closes-badly", closing(3, func(context.Context, generator.Facts) io.Reader { return strings.NewReader("whole") }, errors.New("save failed"))),
 		endpoint.InScope("bare", endpoint.API, "GET", "/v1/bare", nil),
 		endpoint.OutOfScope("out", endpoint.API, "GET", "/v1/out", "remote sessions"),
 	})
@@ -619,5 +656,54 @@ func TestNetHTTPLogLineIsAFailedRecord(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no server record")
+	}
+}
+
+func TestAClosableBodyIsClosedOnceAndWhatItAddsReachesTheRecord(t *testing.T) {
+	h := start(t)
+	if _, body := do(t, h.proxied(), "GET", "https://api.anthropic.com/v1/closes-whole", nil); body != "whole" {
+		t.Fatalf("body %q", body)
+	}
+	if r := h.request(t); r.Outcome != RequestOutcome("served") || r.Facts["closed"] != true || closeCounts[0].Load() != 1 {
+		t.Errorf("a body read to its end: %+v, closed %d times", r, closeCounts[0].Load())
+	}
+
+	res, err := h.proxied().Get("https://api.anthropic.com/v1/closes-abandoned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bufio.NewReader(res.Body).ReadString('\n')
+	res.Body.Close()
+	if r := h.request(t); r.Outcome != Aborted || r.Facts["closed"] != true || closeCounts[1].Load() != 1 {
+		t.Errorf("a body the client abandoned: %+v, closed %d times", r, closeCounts[1].Load())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/closes-unread", strings.NewReader("{}"))
+	go func() { <-reached; cancel() }()
+	if _, err := h.proxied().Do(req); err == nil {
+		t.Fatal("the request was answered")
+	}
+	if r := h.request(t); r.Outcome != Aborted || r.Facts["closed"] != true || closeCounts[2].Load() != 1 {
+		t.Errorf("a body never delivered: %+v, closed %d times", r, closeCounts[2].Load())
+	}
+}
+
+func TestACloseThatFailsFailsTheRequest(t *testing.T) {
+	h := start(t)
+	do(t, h.proxied(), "GET", "https://api.anthropic.com/v1/closes-badly", nil)
+	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "closing the response body: save failed" || r.Facts["closed"] != true {
+		t.Errorf("record %+v", r)
+	}
+}
+
+func TestACloseThatFailsKeepsTheCauseAlreadyOnTheRecord(t *testing.T) {
+	h := start(t)
+	if res, err := h.proxied().Get("https://api.anthropic.com/v1/closes-after-failure"); err == nil { // the cut connection may fail the client's read
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}
+	if r := h.request(t); r.Outcome != RequestFailed || r.Why != "response body failed: cut; closing the response body: save failed" {
+		t.Errorf("record %+v", r)
 	}
 }
