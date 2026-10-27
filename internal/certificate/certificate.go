@@ -109,6 +109,9 @@ authorityKeyIdentifier = keyid
 func openssl(dir string, args ...string) error {
 	cmd := exec.Command("openssl", args...)
 	cmd.Dir = dir
+	// Its own process group: a terminal's Ctrl-C signals the foreground group, and the first signal
+	// asks serve to stop gracefully - it must not kill the build serve is waiting on.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

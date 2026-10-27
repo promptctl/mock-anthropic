@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
@@ -281,5 +283,23 @@ func TestFailingOpensslFailsTheStartAndNamesItsCommand(t *testing.T) {
 	_, err := Ensure(t.TempDir(), nil)
 	if err == nil || !strings.Contains(err.Error(), "openssl x509 -req ") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A terminal's Ctrl-C signals the foreground process group; openssl outside it survives the signal
+// that asks serve to stop gracefully.
+func TestOpensslRunsOutsideTheCallersProcessGroup(t *testing.T) {
+	bin, out := t.TempDir(), filepath.Join(t.TempDir(), "pgid")
+	script := "#!/bin/sh\nps -o pgid= -p $$ > " + out + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "openssl"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := openssl(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(read(t, out)))
+	if own := strconv.Itoa(syscall.Getpgrp()); got == "" || got == own {
+		t.Fatalf("openssl's process group %q, the caller's %q: want different", got, own)
 	}
 }
