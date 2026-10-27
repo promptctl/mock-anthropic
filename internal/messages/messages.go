@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf16"
 )
 
 // CountTokensRequest is a `POST /v1/messages/count_tokens` body that parsed. [LAW:parse-dont-validate]
@@ -39,10 +40,7 @@ func ParseCountTokens(raw []byte) (CountTokensRequest, error) {
 func tokens(text string) int {
 	units := 0
 	for _, r := range text {
-		units++
-		if r >= 0x10000 {
-			units++ // a surrogate pair
-		}
+		units += utf16.RuneLen(r)
 	}
 	return (units + 3) / 4
 }
@@ -70,13 +68,17 @@ func inputTokens(system, messages, tools json.RawMessage) int {
 	return tokens(text.String())
 }
 
-// decodeObject reads raw as exactly one JSON object into into: Unmarshal refuses trailing data and
-// any value that is not an object, so no second pass can disagree with the first.
+// decodeObject reads raw as exactly one JSON object into into. Unmarshal refuses trailing data, so
+// "is it JSON" and "is it an object" are each answered once, with their own reason.
 func decodeObject(raw []byte, into any) error {
-	if err := json.Unmarshal(raw, into); err != nil {
-		return fmt.Errorf("not a JSON object: %w", err)
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return fmt.Errorf("body is not JSON: %w", err)
 	}
-	return nil
+	if _, ok := value.(map[string]any); !ok {
+		return fmt.Errorf("expected an object, got %s", kindOf(value))
+	}
+	return json.Unmarshal(raw, into)
 }
 
 // checkBase is what a Messages request and a token count request share: `model` is a non-empty
@@ -230,4 +232,18 @@ func checkToolResultBlock(raw json.RawMessage) error {
 		return errors.New("a tool_result block cannot hold a tool_result block")
 	}
 	return nil
+}
+
+func kindOf(value any) string {
+	switch value.(type) {
+	case []any:
+		return "an array"
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	case nil:
+		return "null"
+	}
+	return "a number"
 }
