@@ -12,7 +12,7 @@ Pin a release tag:
 go install github.com/promptctl/mock-anthropic@v0.1.0
 ```
 
-The binary is `mock-anthropic`. It needs `openssl` on the path the first time it starts, to generate its certificate authority. The CA is written to a `certs` directory next to the binary (`$GOBIN/certs` after `go install`), so that directory must be writable.
+The binary is `mock-anthropic`. It needs `openssl` on the path the first time it starts, to generate its certificate authority. The CA is written to a `certs` directory next to the binary, in the directory `go install` put it in, so that directory must be writable. The quick start below also uses `jq`.
 
 ## Quick start
 
@@ -21,12 +21,13 @@ Start the mock, log a Claude Code config directory in, and run Claude Code again
 ```sh
 mkdir -p scripts
 mock-anthropic serve --port 0 --scenarios ./scripts 2>serve.log >serve.json &
-until [ -s serve.json ]; do sleep 0.2; done   # serve.json: {"port": 51234, "ca": "/path/to/ca/cert.pem"}
+until [ -s serve.json ]; do kill -0 $! 2>/dev/null || { cat serve.log; break; }; sleep 0.2; done   # serve.json: {"port": 51234, "ca": "/path/to/ca/cert.pem"}
 
 mock-anthropic login /tmp/cc-config --trust "$PWD"
 
 eval "$(mock-anthropic env --port "$(jq -r .port serve.json)" --ca "$(jq -r .ca serve.json)" --config-dir /tmp/cc-config | sed 's/^/export /')"
 claude -p "Say hello and nothing else." --output-format text
+kill %1   # stop the mock
 ```
 
 With no script matching, the mock answers a Messages request with a 400 and an `UNMATCHED` line on stderr. Write a script (below) or replay a recording.
