@@ -36,3 +36,10 @@ func TestAFlagErrorIsAUsageErrorNamingTheFlagWithTwoDashes(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+func TestADoubleDashTakenAsAFlagValueDoesNotEndTheFlags(t *testing.T) {
+	pos, trust, err := parse("--trust", "--", "dir", "--trust", "x")
+	if err != nil || !slices.Equal(pos, []string{"dir"}) || !slices.Equal(trust, []string{"--", "x"}) {
+		t.Errorf("%v %v %v", pos, trust, err)
+	}
+}

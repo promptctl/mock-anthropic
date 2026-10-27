@@ -168,11 +168,14 @@ func TestATrustedProjectIsKeyedByItsRealPathOnceHoweverItIsSpelled(t *testing.T)
 func TestAWrongCommandLineIsAUsageError(t *testing.T) {
 	notDir := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(notDir, nil, 0o600)
+	dangling := filepath.Join(t.TempDir(), "dangling")
+	os.Symlink(filepath.Join(t.TempDir(), "gone"), dangling)
 	for name, args := range map[string][]string{
 		"no config dir":         {},
 		"an empty config dir":   {""},
 		"two config dirs":       {t.TempDir(), t.TempDir()},
 		"a file as config dir":  {notDir},
+		"a dangling symlink":    {dangling},
 		"a file under a file":   {filepath.Join(notDir, "x")},
 		"a missing trust dir":   {t.TempDir(), "--trust", filepath.Join(t.TempDir(), "nope")},
 		"a trust file":          {t.TempDir(), "--trust", notDir},

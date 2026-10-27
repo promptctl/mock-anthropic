@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 )
@@ -55,12 +56,34 @@ func Flags(name string, declare func(*flag.FlagSet), args []string) ([]string, e
 		if len(rest) == 0 {
 			return positionals, nil
 		}
-		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+		if consumed := len(args) - len(rest); consumed > 0 && endedFlags(fs, args[:consumed]) {
 			return append(positionals, rest...), nil
 		}
 		positionals = append(positionals, rest[0])
 		args = rest[1:]
 	}
+}
+
+// endedFlags reports whether a parse that consumed these args ended on a bare `--`. The last token alone
+// cannot say: `--trust --` consumes `--` as the flag's value. Replaying the tokens tells a value from a
+// terminator, as package flag itself reads them.
+func endedFlags(fs *flag.FlagSet, consumed []string) bool {
+	for i := 0; i < len(consumed); i++ {
+		tok := consumed[i]
+		if tok == "--" {
+			return i == len(consumed)-1
+		}
+		name := strings.TrimLeft(tok, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		if f := fs.Lookup(name); f != nil {
+			if b, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !b.IsBoolFlag() {
+				i++ // the next token is this flag's value
+			}
+		}
+	}
+	return false
 }
 
 // Absolute is a command-line path made absolute, so a record names it whatever the reader's working

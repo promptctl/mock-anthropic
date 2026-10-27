@@ -138,18 +138,20 @@ func removeKeychainEntries(ctx context.Context, service string) (*int, error) {
 // configDirectory makes the config dir if it is not there; a path that names something else is a wrong
 // command line. It returns whether it made it.
 func configDirectory(path string) (bool, error) {
+	notDirectory := &command.UsageError{Why: fmt.Sprintf("<config-dir> %s: not a directory", path)}
 	info, err := os.Stat(path)
 	switch {
 	case err == nil && info.IsDir():
 		return false, nil
 	case err == nil, errors.Is(err, syscall.ENOTDIR):
-		return false, &command.UsageError{Why: fmt.Sprintf("<config-dir> %s: not a directory", path)}
+		return false, notDirectory
 	case !errors.Is(err, fs.ErrNotExist):
 		return false, err
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return false, &command.UsageError{Why: fmt.Sprintf("<config-dir> %s: not a directory", path)}
+		// EEXIST: a dangling symlink, which Stat reads as absent and MkdirAll cannot replace.
+		if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrExist) {
+			return false, notDirectory
 		}
 		return false, err
 	}
