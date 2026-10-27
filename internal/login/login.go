@@ -63,6 +63,10 @@ func Files(a account.Account, trusted []string, now time.Time) ([]File, error) {
 	}}
 	config := map[string]any{
 		"hasCompletedOnboarding": true,
+		// Records the official marketplace install as done: 2.1.299 downloads the marketplace archive
+		// on first start unless it finds that, and the download is out of scope for the mock.
+		"officialMarketplaceAutoInstallAttempted": true,
+		"officialMarketplaceAutoInstalled":        true,
 		"oauthAccount": map[string]any{
 			"accountUuid":      a.AccountUUID(),
 			"emailAddress":     a.EmailAddress(),
