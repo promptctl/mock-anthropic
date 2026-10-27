@@ -134,7 +134,7 @@ func start(t *testing.T) *harness {
 		case ConnectionEvent:
 			h.connections <- e
 		}
-	}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
+	}, Log: testLog{t}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,4 +581,12 @@ func TestStopEndsEveryUnitAndSaysSo(t *testing.T) {
 	if e := h.connection(t); e.Outcome != Closed || *e.ClosedBy != ByStop || *e.Requests != 1 {
 		t.Errorf("connection %+v", e)
 	}
+}
+
+// testLog fails the test on any line net/http logs: none of these tests gives it one.
+type testLog struct{ t *testing.T }
+
+func (l testLog) Write(p []byte) (int, error) {
+	l.t.Errorf("net/http logged: %s", p)
+	return len(p), nil
 }

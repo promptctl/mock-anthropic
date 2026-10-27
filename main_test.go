@@ -355,6 +355,7 @@ func TestServeWrongCommandLine(t *testing.T) {
 		{"an empty scripts directory path", []string{"--scenarios", ""}, "--scenarios: an empty path"},
 		{"an empty account file path", []string{"--account", ""}, "--account: an empty path"},
 		{"a flag that takes one value, given twice", []string{"--port", "0", "--port", "1"}, "--port: given more than once"},
+		{"a flag value with a dash in it, kept as given", []string{"--port", "0", "--port", "1 -x"}, `invalid value "1 -x" for flag --port: given more than once`},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			argv := append([]string{"serve"}, tc.args...)

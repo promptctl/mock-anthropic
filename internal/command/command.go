@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -210,6 +211,9 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	ended := make(chan struct{})
 	defer close(ended)
 	crash := func(err error) {
+		if err == nil {
+			err = errors.New("a crash was reported with no error")
+		}
 		select {
 		case crashes <- err:
 		case <-ended: // the invocation has its record already; nothing is left to end
@@ -231,20 +235,25 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	}()
 
 	var ends []end
-	crashed := false
+	crashed, signalled := false, 0
 	for {
 		select {
 		case sig := <-signals:
 			if len(done) > 0 { // the command finished before the signal could end it; its ending stands
 				continue
 			}
-			ends = append(ends, end{name: Signals[sig]})
+			ends, signalled = append(ends, end{name: Signals[sig]}), signalled+1
 			cancel()
-			if cmd.Kind == Task || len(ends) > 1 {
+			if cmd.Kind == Task || signalled > 1 {
 				return failed(ends, nil, Facts{}), ends
 			}
 		case err := <-crashes:
-			ends, crashed = append(ends, end{name: "crash", crash: err.Error()}), true
+			// A sink that keeps failing reports the same crash from every record its stop writes; once is
+			// the fact.
+			if !slices.Contains(ends, end{name: "crash", crash: err.Error()}) {
+				ends = append(ends, end{name: "crash", crash: err.Error()})
+			}
+			crashed = true
 			cancel()
 			// A crash never cuts a stop short: a stopping Service still returns, so what it learned stays
 			// on the record; a Task that already finished fails with its facts.

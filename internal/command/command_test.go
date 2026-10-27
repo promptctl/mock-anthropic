@@ -222,7 +222,7 @@ func TestReportedCrashStopsAServiceAndKeepsItsFacts(t *testing.T) {
 }
 
 // A sink that keeps failing reports again from every record its own stop writes; none of those cuts
-// the stop short.
+// the stop short, and the record tells the crash once.
 func TestCrashWhileACrashedServiceStopsKeepsItsFacts(t *testing.T) {
 	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
 		crash(errors.New("a sink broke"))
@@ -234,7 +234,7 @@ func TestCrashWhileACrashedServiceStopsKeepsItsFacts(t *testing.T) {
 	if exit != 1 {
 		t.Errorf("exit %d, want 1", exit)
 	}
-	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke\nwhile the command was ending: a sink broke", "facts": map[string]any{"port": 1}})
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke", "facts": map[string]any{"port": 1}})
 }
 
 func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
@@ -249,19 +249,22 @@ func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
 	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke", "facts": map[string]any{}})
 }
 
-func TestSignalWhileACrashedServiceStopsEndsItAtOnce(t *testing.T) {
-	signals := make(chan os.Signal, 1)
+// A crash is not a signal: the first signal while a crashed Service stops is the operator's first, and
+// only a second one ends the invocation at once.
+func TestSecondSignalWhileACrashedServiceStopsEndsItAtOnce(t *testing.T) {
+	signals := make(chan os.Signal, 2)
 	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
 		crash(errors.New("a sink broke"))
 		<-ctx.Done()
 		signals <- syscall.SIGTERM
+		signals <- syscall.SIGINT
 		select {}
 	}}}
 	exit, record, _ := run(t, service, []string{"stand_in"}, signals)
 	if exit != 1 {
 		t.Errorf("exit %d, want 1", exit)
 	}
-	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke\nSIGTERM while the command was ending"})
+	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "crash", "why": "before the command finished: a sink broke\nSIGTERM while the command was ending\nSIGINT while the command was ending"})
 }
 
 func TestNothingFollowsTheRecord(t *testing.T) {

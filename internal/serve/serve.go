@@ -47,6 +47,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 				// one build presents the CA a consumer already trusts.
 				CertsDir: filepath.Join(filepath.Dir(executable), "certs"),
 				Emit:     Sink(stderr, crash),
+				Log:      stderr,
 				Crash:    crash,
 			})
 			if err != nil {
@@ -107,13 +108,13 @@ type config struct {
 
 var portText = regexp.MustCompile(`^\d{1,5}$`)
 
-// oneDash is a flag name as package flag writes it in an error: one dash, after a space.
-var oneDash = regexp.MustCompile(`(\s)-(\w)`)
+// oneDash is the flag name in each error package flag writes, which it gives one dash; anchored to the
+// message, so a dash inside a flag's value stays as given.
+var oneDash = regexp.MustCompile(`^(flag provided but not defined: |flag needs an argument: |invalid value ".*" for flag )-`)
 
 // once is a flag that takes one value; given twice, it is a wrong command line.
 type once struct {
 	value *string
-	name  string
 }
 
 func (o *once) String() string { return "" }
@@ -135,14 +136,14 @@ func (l *list) Set(v string) error { *l = append(*l, v); return nil }
 func parse(args []string) (config, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	port, accountFlag := &once{name: "port"}, &once{name: "account"}
+	port, accountFlag := &once{}, &once{}
 	var scenarios list
 	fs.Var(port, "port", "")
 	fs.Var(accountFlag, "account", "")
 	fs.Var(&scenarios, "scenarios", "")
 	if err := fs.Parse(args); err != nil {
 		// flag names a flag by one dash; PROJECT.md and the usage line name every flag by two.
-		return config{}, &command.UsageError{Why: oneDash.ReplaceAllString(err.Error(), "$1--$2")}
+		return config{}, &command.UsageError{Why: oneDash.ReplaceAllString(err.Error(), "${1}--")}
 	}
 	if fs.NArg() > 0 {
 		return config{}, &command.UsageError{Why: "unexpected argument: " + fs.Arg(0)}
