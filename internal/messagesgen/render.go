@@ -24,13 +24,13 @@ import (
 // [LAW:nothing-unseen] The facts describe what was sent and are built from the same values as the
 // response: which form the reply took and, for a message, its id, the key that joins the record to the
 // consumer's transcript.
-func render(ctx context.Context, reply script.Reply, request messages.Request) (generator.Response, generator.Facts, error) {
+func render(ctx context.Context, reply script.Reply, request messages.Request, seen *occurrences) (generator.Response, generator.Facts, error) {
 	switch reply := reply.(type) {
 	case script.LiteralReply:
 		response := generator.Response{Status: reply.Status, Header: reply.Header.Clone(), Body: bytes.NewReader(reply.Body)}
 		return response, generator.Facts{"kind": "literal", "status": reply.Status}, nil
 	case script.MessageReply:
-		m := assistantMessage(reply, request)
+		m := assistantMessage(reply, request, seen.next(request.Raw))
 		if !request.Stream {
 			body, err := json.Marshal(m.message)
 			if err != nil {
@@ -108,10 +108,10 @@ type assistant struct {
 	parts   []part
 }
 
-// [LAW:types-are-the-program] Every id is a function of the raw body alone: the same request gets the
-// same ids in every run, and different requests get different ones, with no counter to keep. The body
-// is hashed once; each block's id hashes that digest with the block's type and index, joined by NUL,
-// which none of them holds, so no two part lists hash alike.
+// [LAW:types-are-the-program] Every id is a function of the raw body and how many times that body has
+// been answered: the same request sequence gets the same ids in every run, and no two answers share
+// one. The body and its occurrence are hashed once; each block's id hashes that digest with the block's
+// type and index, joined by NUL, which none of them holds, so no two part lists hash alike.
 func digest(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
@@ -119,8 +119,8 @@ func digest(parts ...string) string {
 
 const idHex = 24
 
-func assistantMessage(reply script.MessageReply, request messages.Request) assistant {
-	requestDigest := digest(request.Raw)
+func assistantMessage(reply script.MessageReply, request messages.Request, occurrence int) assistant {
+	requestDigest := digest(request.Raw, fmt.Sprint(occurrence))
 	a := assistant{}
 	output := 0
 	for index, b := range reply.Content {
@@ -137,7 +137,7 @@ func assistantMessage(reply script.MessageReply, request messages.Request) assis
 		Model:      request.Model,
 		Content:    a.message.Content,
 		StopReason: &stop,
-		Usage:      usage{InputTokens: request.InputTokens, OutputTokens: max(1, output)},
+		Usage:      usage{InputTokens: request.InputTokens, OutputTokens: min(request.MaxTokens, max(1, output))},
 	}
 	return a
 }
@@ -150,16 +150,17 @@ func blockPart(b script.Block, requestDigest string, index int) part {
 			delta: func(c string) map[string]any { return map[string]any{"type": "text_delta", "text": c} },
 		}
 	case script.ToolUse:
-		var input bytes.Buffer
-		// The script parser accepted the input as a JSON object, so it compacts.
-		if err := json.Compact(&input, b.Input); err != nil {
-			panic(fmt.Sprintf("a tool input the script parser accepted does not compact: %v", err))
+		// The script parser accepted the input as a JSON object, so it marshals. [LAW:one-source-of-truth]
+		// Marshaling is what the whole message does to the input; the deltas carry those same bytes.
+		input, err := json.Marshal(b.Input)
+		if err != nil {
+			panic(fmt.Sprintf("a tool input the script parser accepted does not marshal: %v", err))
 		}
 		id := "toolu_" + digest(requestDigest, "tool_use", fmt.Sprint(index))[:idHex]
 		return part{
-			whole: toolUseBlock{"tool_use", id, b.Name, json.RawMessage(input.Bytes())},
+			whole: toolUseBlock{"tool_use", id, b.Name, json.RawMessage(input)},
 			start: toolUseBlock{"tool_use", id, b.Name, json.RawMessage("{}")},
-			text:  input.String(),
+			text:  string(input),
 			delta: func(c string) map[string]any { return map[string]any{"type": "input_json_delta", "partial_json": c} },
 		}
 	case script.Thinking:
@@ -237,6 +238,9 @@ type stream struct {
 }
 
 func (s *stream) Read(p []byte) (int, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(s.pending) == 0 {
 		if len(s.frames) == 0 {
 			return 0, io.EOF

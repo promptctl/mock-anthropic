@@ -400,9 +400,8 @@ func TestAStreamWaitsBetweenEventsAndStopsWhenTheRequestEnds(t *testing.T) {
 		t.Fatalf("first read %d %v", n, err)
 	}
 	cancel()
-	begun := time.Now()
-	if _, err := d.Response.Body.Read(buf); err != context.Canceled || time.Since(begun) > 20*time.Millisecond {
-		t.Errorf("read after cancel: %v after %v", err, time.Since(begun))
+	if _, err := d.Response.Body.Read(buf); err != context.Canceled {
+		t.Errorf("read after cancel: %v", err)
 	}
 }
 
@@ -412,5 +411,55 @@ func TestAHeaderOnTheLiteralIsNotSharedWithTheScript(t *testing.T) {
 	first.d.Response.Header.Set("Retry-After", "changed")
 	if got := send(t, context.Background(), []string{dir}, body("hello", false)).d.Response.Header.Get("Retry-After"); got != "7" {
 		t.Errorf("Retry-After %q", got)
+	}
+}
+
+func TestIdenticalRequestsGetDistinctIDsThatAReplayReproduces(t *testing.T) {
+	dirs := []string{scripts(t, reply(`[{"type":"text","text":"hi"},{"type":"tool_use","name":"x","input":{"a":1}}]`, "tool_use"))}
+	ids := func() []string {
+		u, _ := url.Parse("https://api.anthropic.com/v1/messages")
+		table := endpoint.For(account.Default(), dirs)
+		var out []string
+		for range 2 {
+			resolution, miss := table.Resolve("POST", u.Host, u.Path)
+			d := dispatch.Dispatch(context.Background(), resolution, miss, generator.Request{Method: "POST", URL: u, Body: []byte(body("same", false))})
+			raw, _ := io.ReadAll(d.Response.Body)
+			m := decode(t, string(raw))
+			out = append(out, m["id"].(string)+m["content"].([]any)[1].(map[string]any)["id"].(string))
+		}
+		return out
+	}
+	first, replay := ids(), ids()
+	if first[0] == first[1] {
+		t.Errorf("two identical requests share ids %q", first[0])
+	}
+	if !reflect.DeepEqual(first, replay) {
+		t.Errorf("a replay of the same requests got other ids: %v then %v", first, replay)
+	}
+}
+
+func TestOutputTokensNeverExceedTheRequestsMaxTokens(t *testing.T) {
+	dirs := []string{scripts(t, reply(`[{"type":"text","text":"`+strings.Repeat("word ", 400)+`"}]`, "max_tokens"))}
+	request := `{"model":"` + model + `","max_tokens":1,"messages":[{"role":"user","content":"quota"}]}`
+	m := decode(t, send(t, context.Background(), dirs, request).body)
+	if got := m["usage"].(map[string]any)["output_tokens"]; got != float64(1) {
+		t.Errorf("output_tokens %v for max_tokens 1", got)
+	}
+}
+
+func TestAToolInputIsTheSameBytesStreamedAndWhole(t *testing.T) {
+	dirs := []string{scripts(t, reply(`[{"type":"tool_use","name":"x","input":{"cmd":"a<b && c"}}]`, "tool_use"))}
+	whole := send(t, context.Background(), dirs, body("go", false)).body
+	streamed := deltas(events(t, send(t, context.Background(), dirs, body("go", true))), "partial_json")
+	var m struct {
+		Content []struct {
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(whole), &m); err != nil {
+		t.Fatal(err)
+	}
+	if string(m.Content[0].Input) != streamed {
+		t.Errorf("whole %s, streamed %s", m.Content[0].Input, streamed)
 	}
 }

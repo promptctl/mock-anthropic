@@ -6,6 +6,7 @@ package messagesgen
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/promptctl/mock-anthropic/internal/generator"
 	"github.com/promptctl/mock-anthropic/internal/messages"
@@ -17,6 +18,7 @@ import (
 // be read or is not a script is an error out of script.InOrder, which dispatch turns into the 500 and
 // FAILED line naming its path, on every Messages request (PROJECT.md "A bad script").
 func New(dirs []string, builtIns []script.Script) generator.Func {
+	seen := &occurrences{count: map[string]int{}}
 	return func(ctx context.Context, _ map[string]string, r generator.Request) (generator.Answer, error) {
 		scripts, err := script.InOrder(dirs, builtIns)
 		if err != nil {
@@ -31,7 +33,7 @@ func New(dirs []string, builtIns []script.Script) generator.Func {
 		// or every script tried. "0 tried" is a request that found no scripts at all.
 		switch selection := script.FirstReply(scripts, request).(type) {
 		case script.Matched:
-			response, sent, err := render(ctx, selection.Reply, request)
+			response, sent, err := render(ctx, selection.Reply, request, seen)
 			if err != nil {
 				return generator.Answer{}, err
 			}
@@ -45,4 +47,20 @@ func New(dirs []string, builtIns []script.Script) generator.Func {
 			return generator.Answer{}, fmt.Errorf("script selection of type %T is neither matched nor unmatched", selection)
 		}
 	}
+}
+
+// occurrences counts how many times each request body has been answered with a message, so identical
+// bodies (the quota probe every session, parallel subagents) get distinct ids that a replay of the same
+// request sequence still reproduces.
+type occurrences struct {
+	mu    sync.Mutex
+	count map[string]int
+}
+
+func (o *occurrences) next(body string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := o.count[body]
+	o.count[body] = n + 1
+	return n
 }
