@@ -66,15 +66,17 @@ var classifierAllows = []struct {
 // The quota probe asks for one token so Claude Code can read the rate-limit headers; its body is unread.
 var quotaProbe = says("OK", script.StopMaxTokens)
 
+// The title answer, like every reply here, is built once and never mutated.
+var sessionTitle = says(`{"title":"Mock session"}`, script.StopEndTurn)
+
 // All is the built-in answers, in the order they are tried.
 func All() []script.Script {
-	title := says(`{"title":"Mock session"}`, script.StopEndTurn)
 	scripts := []script.Script{{
 		Origin: "built-in: session title",
 		Answer: func(r messages.Request) script.Reply {
 			for _, opening := range titlePrompts {
 				if _, ok := promptBlock(r, opening); ok {
-					return title
+					return sessionTitle
 				}
 			}
 			return nil

@@ -16,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
-	"github.com/promptctl/mock-anthropic/internal/builtin"
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
 	"github.com/promptctl/mock-anthropic/internal/generator"
@@ -352,9 +351,12 @@ func TestALiteralOnAStatusWithNoBodyHasAnEmptyBody(t *testing.T) {
 
 func TestARequestNoScriptMatchesIsRefusedAndNamesEveryScriptTried(t *testing.T) {
 	// The built-ins are tried after the consumer's scripts, so they are named too.
-	builtIns := []string{}
-	for _, b := range builtin.All() {
-		builtIns = append(builtIns, b.Origin)
+	builtIns := []string{
+		"built-in: session title",
+		"built-in: auto mode classifier, severity",
+		"built-in: auto mode classifier, block",
+		"built-in: auto mode classifier, classify_result tool",
+		"built-in: quota probe",
 	}
 	dir := scripts(t, map[string]string{"a.json": `{"match":{"lastUserContains":["nope"]},"reply":{"kind":"literal","status":200,"body":"x"}}`})
 	s := send(t, context.Background(), []string{dir}, body("hello", false))

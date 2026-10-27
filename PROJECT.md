@@ -71,7 +71,7 @@ The mock is a record/replay request server. In record mode it forwards each requ
 
 Claude Code makes some model calls beside a turn. The mock recognizes each one by its prompt and generates the answer, so a consumer never has to script them:
 
-- **Session title.** Both phrasings are covered: "Generate a concise, sentence-case title" and "You are naming a coding session so the user can pick it out of a long list of sessions." The answer is a title in the JSON shape the request's output format asks for.
+- **Session title.** Both phrasings are covered: "Generate a concise, sentence-case title" and "You are naming a coding session so the user can pick it out of a long list of sessions." Both ask, through the request's output format, for a JSON object with one string field, `title`; the answer is that object.
 - **Auto mode permission classifier.** Its system prompt opens with "You are a security monitor for autonomous AI coding agents." The answer is in the format the prompt asks for: `<severity>N</severity>`, where a value below 50 allows the action; `<block>yes</block>` / `<block>no</block>`; or a `classify_result` tool call (the `tengu_auto_mode_config` flag's `twoStageClassifier` selects among them). The default allows; a consumer can script a block.
 - **Quota probe.** A request for one token (`max_tokens: 1`) whose last user message is exactly `quota`. Claude Code reads only the rate-limit headers; the answer is a one-token message cut off at `max_tokens`.
 

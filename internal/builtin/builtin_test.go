@@ -43,9 +43,10 @@ func answer(t *testing.T, r messages.Request) script.Selection {
 
 func matched(t *testing.T, r messages.Request) (string, script.MessageReply) {
 	t.Helper()
-	m, ok := answer(t, r).(script.Matched)
+	sel := answer(t, r)
+	m, ok := sel.(script.Matched)
 	if !ok {
-		t.Fatalf("no built-in answered: %+v", answer(t, r))
+		t.Fatalf("no built-in answered: %+v", sel)
 	}
 	reply, ok := m.Reply.(script.MessageReply)
 	if !ok {
@@ -160,5 +161,23 @@ func TestConsumerScriptTakesPrecedence(t *testing.T) {
 	m, ok := script.FirstReply(scripts, request(t, nil, "quota", 1)).(script.Matched)
 	if !ok || m.Origin != filepath.Join(dir, "quota.json") || text(t, m.Reply.(script.MessageReply)) != "mine" {
 		t.Fatalf("%+v", m)
+	}
+}
+
+// The documented built-ins, in the order they are tried; a built-in added or dropped changes this on purpose.
+func TestTheBuiltInsAreTheDocumentedFive(t *testing.T) {
+	got := []string{}
+	for _, b := range builtin.All() {
+		got = append(got, b.Origin)
+	}
+	want := []string{
+		"built-in: session title",
+		"built-in: auto mode classifier, severity",
+		"built-in: auto mode classifier, block",
+		"built-in: auto mode classifier, classify_result tool",
+		"built-in: quota probe",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("built-ins %q", got)
 	}
 }
