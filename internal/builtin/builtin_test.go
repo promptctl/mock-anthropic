@@ -164,8 +164,8 @@ func TestConsumerScriptTakesPrecedence(t *testing.T) {
 	}
 }
 
-// The documented built-ins, in the order they are tried; a built-in added or dropped changes this on purpose.
-func TestTheBuiltInsAreTheDocumentedFive(t *testing.T) {
+// The built-ins in the order they are tried; a built-in added or dropped changes this on purpose.
+func TestTheBuiltInsAndTheirOrder(t *testing.T) {
 	got := []string{}
 	for _, b := range builtin.All() {
 		got = append(got, b.Origin)
