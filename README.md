@@ -12,19 +12,20 @@ Pin a release tag:
 go install github.com/promptctl/mock-anthropic@v0.1.0
 ```
 
-The binary is `mock-anthropic`. It needs `openssl` on the path the first time it starts, to generate its certificate authority.
+The binary is `mock-anthropic`. It needs `openssl` on the path the first time it starts, to generate its certificate authority. The CA is written to a `certs` directory next to the binary (`$GOBIN/certs` after `go install`), so that directory must be writable.
 
 ## Quick start
 
 Start the mock, log a Claude Code config directory in, and run Claude Code against it:
 
 ```sh
-mock-anthropic serve --port 0 --scenarios ./scripts 2>serve.log | tee serve.json &
-# serve.json: {"port": 51234, "ca": "/path/to/ca/cert.pem"}
+mkdir -p scripts
+mock-anthropic serve --port 0 --scenarios ./scripts 2>serve.log >serve.json &
+until [ -s serve.json ]; do sleep 0.2; done   # serve.json: {"port": 51234, "ca": "/path/to/ca/cert.pem"}
 
 mock-anthropic login /tmp/cc-config --trust "$PWD"
 
-eval "$(mock-anthropic env --port 51234 --ca /path/to/ca/cert.pem --config-dir /tmp/cc-config | sed 's/^/export /')"
+eval "$(mock-anthropic env --port "$(jq -r .port serve.json)" --ca "$(jq -r .ca serve.json)" --config-dir /tmp/cc-config | sed 's/^/export /')"
 claude -p "Say hello and nothing else." --output-format text
 ```
 
@@ -93,6 +94,8 @@ HTTPS_PROXY=http://127.0.0.1:18801 NODE_EXTRA_CA_CERTS=<ca path from the startup
   claude -p "Run the shell command: echo hello. Then reply with the single word done." --allowedTools Bash
 # SIGINT the mock when the run ends
 ```
+
+Run this in a shell where `env`'s variables are not exported: the instance must carry your real login, not the mock's `CLAUDE_CONFIG_DIR`, or the real host rejects the forwarded requests and nothing is saved.
 
 Each successful Messages exchange is scrubbed and saved as the next `NNNN.json`. Credentials, email addresses, the account UUID and every other UUID are replaced before saving, and an exchange with any left is not saved. Other text (file paths, host names, your prompt, the system prompt) is saved as it is: read a recording before you commit it.
 
