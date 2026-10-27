@@ -235,7 +235,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 	}()
 
 	var ends []end
-	crashed, signalled := false, 0
+	signalled := 0
 	for {
 		select {
 		case sig := <-signals:
@@ -253,7 +253,6 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			if !slices.Contains(ends, end{name: "crash", crash: err.Error()}) {
 				ends = append(ends, end{name: "crash", crash: err.Error()})
 			}
-			crashed = true
 			cancel()
 			// A crash never cuts a stop short: a stopping Service still returns, so what it learned stays
 			// on the record; a Task that already finished fails with its facts.
@@ -269,7 +268,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			switch {
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
-			case s.err != nil || crashed:
+			case s.err != nil || slices.ContainsFunc(ends, func(e end) bool { return e.crash != "" }):
 				return failed(ends, s.err, s.result.Facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
 				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
