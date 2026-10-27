@@ -26,7 +26,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 	return command.Command{
 		Kind:  command.Service,
 		Usage: "[--port N] [--scenarios DIR]... [--account FILE]",
-		Run: func(ctx context.Context, args []string, crash func(error)) (command.Result, error) {
+		Run: func(ctx context.Context, args []string, crash func(error), learn func(command.Facts)) (command.Result, error) {
 			c, err := parse(args)
 			if err != nil {
 				return command.Result{}, err
@@ -53,6 +53,18 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 				return command.Result{}, err
 			}
 			certs := s.Certificates()
+			// [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
+			// from. What ended the run is the dispatcher's to record. Learned before serving, so a second
+			// signal at any point after this still finds them on the record. The dispatcher keeps what was
+			// learned on every ending.
+			facts := command.Facts{
+				"port":         s.Port(),
+				"ca":           certs.CA.CertPath,
+				"account_file": c.accountFile,
+				"scenarios":    c.scenarios,
+				"certificates": map[string]string{"ca": string(certs.CA.Outcome), "leaf": string(certs.Leaf.Outcome)},
+			}
+			learn(facts)
 			ready, err := json.Marshal(struct {
 				Port int    `json:"port"`
 				CA   string `json:"ca"`
@@ -67,15 +79,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			}
 			<-ctx.Done()
 			s.Stop()
-			// [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
-			// from. What ended the run is the dispatcher's to record.
-			return command.Result{Answer: command.OK, Facts: command.Facts{
-				"port":         s.Port(),
-				"ca":           certs.CA.CertPath,
-				"account_file": c.accountFile,
-				"scenarios":    c.scenarios,
-				"certificates": map[string]string{"ca": string(certs.CA.Outcome), "leaf": string(certs.Leaf.Outcome)},
-			}}, nil
+			return command.Result{Answer: command.OK}, nil
 		},
 	}
 }

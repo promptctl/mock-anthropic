@@ -57,8 +57,10 @@ type Command struct {
 	// Run returns a UsageError for a wrong command line; any other error fails the invocation. crash
 	// is how work Run starts outside its own goroutine reports an error nobody caught there: it ends
 	// the invocation as a crash, as a panic in Run does, except that a Service is first stopped, so
-	// what it learned stays on the record.
-	Run func(ctx context.Context, args []string, crash func(error)) (Result, error)
+	// what it learned stays on the record. learn is how a command puts what it has learned on the record
+	// before it returns: a second signal ends the invocation without waiting for Run, and the record then
+	// carries what was learned by then. Facts learned later replace earlier ones of the same name.
+	Run func(ctx context.Context, args []string, crash func(error), learn func(Facts)) (Result, error)
 }
 
 type Commands map[string]Command
@@ -187,6 +189,30 @@ type end struct {
 	crash string
 }
 
+// learnedFacts is what a running command has told the dispatcher so far, from any goroutine.
+type learnedFacts struct {
+	mu    sync.Mutex
+	facts Facts
+}
+
+func (l *learnedFacts) add(f Facts) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, v := range f {
+		l.facts[k] = v
+	}
+}
+
+func (l *learnedFacts) all() Facts {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := Facts{}
+	for k, v := range l.facts {
+		out[k] = v
+	}
+	return out
+}
+
 type settled struct {
 	result Result
 	err    error
@@ -219,6 +245,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 		case <-ended: // the invocation has its record already; nothing is left to end
 		}
 	}
+	learned := learnedFacts{facts: Facts{}}
 	done := make(chan settled, 1)
 	go func() {
 		returned := false
@@ -229,7 +256,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 				done <- settled{crash: "the command exited without returning (runtime.Goexit)"}
 			}
 		}()
-		result, err := cmd.Run(ctx, argv[1:], crash)
+		result, err := cmd.Run(ctx, argv[1:], crash, learned.add)
 		returned = true
 		done <- settled{result: result, err: err}
 	}()
@@ -245,7 +272,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			ends, signalled = append(ends, end{name: Signals[sig]}), signalled+1
 			cancel()
 			if cmd.Kind == Task || signalled > 1 {
-				return failed(ends, nil, Facts{}), ends
+				return failed(ends, nil, learned.all()), ends
 			}
 		case err := <-crashes:
 			// A sink that keeps failing reports the same crash from every record its stop writes; once is
@@ -257,23 +284,26 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 			// A crash never cuts a stop short: a stopping Service still returns, so what it learned stays
 			// on the record; a Task that already finished fails with its facts.
 			if cmd.Kind == Task && len(done) == 0 {
-				return failed(ends, nil, Facts{}), ends
+				return failed(ends, nil, learned.all()), ends
 			}
 		case s := <-done:
 			if s.crash != "" {
 				ends = append(ends, end{name: "crash", crash: s.crash})
-				return failed(ends, nil, Facts{}), ends
+				return failed(ends, nil, learned.all()), ends
 			}
+			// What Run returns is the last thing it learned; one record, whichever way the command ended.
+			learned.add(s.result.Facts)
+			facts := learned.all()
 			var usageErr *UsageError
 			switch {
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
 			case s.err != nil || slices.ContainsFunc(ends, func(e end) bool { return e.crash != "" }):
-				return failed(ends, s.err, s.result.Facts), ends
+				return failed(ends, s.err, facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
-				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
+				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), facts), ends
 			}
-			return ending{Outcome: s.result.Answer, Facts: s.result.Facts}, ends
+			return ending{Outcome: s.result.Answer, Facts: facts}, ends
 		}
 	}
 }
