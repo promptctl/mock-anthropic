@@ -11,8 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/cmdline"
@@ -110,8 +108,6 @@ type config struct {
 	account     account.Account // checked now; the endpoint table answers as it
 }
 
-var portText = regexp.MustCompile(`^\d{1,5}$`)
-
 // [LAW:parse-dont-validate] parse is the one checkpoint serve's command line crosses; every failure
 // is a UsageError naming its cause.
 func parse(args []string) (config, error) {
@@ -130,9 +126,9 @@ func parse(args []string) (config, error) {
 	}
 	c := config{scenarios: []string{}, account: account.Default()}
 	if port.Value != nil {
-		n, err := strconv.Atoi(*port.Value)
-		if !portText.MatchString(*port.Value) || err != nil || n > 65535 {
-			return config{}, &command.UsageError{Why: fmt.Sprintf("--port %q: not a port number from 0 to 65535", *port.Value)}
+		n, err := cmdline.Port("--port", *port.Value, 0)
+		if err != nil {
+			return config{}, err
 		}
 		c.port = n
 	}

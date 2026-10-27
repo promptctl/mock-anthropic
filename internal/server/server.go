@@ -68,7 +68,8 @@ type Server struct {
 }
 
 const (
-	loopback    = "127.0.0.1"
+	// Loopback is the address the mock listens on, and so the address an instance is pointed at.
+	Loopback    = "127.0.0.1"
 	established = "HTTP/1.1 200 Connection Established\r\n\r\n"
 	// Every host in the table speaks HTTPS on 443 and nothing else, and a tunnel is always TLS.
 	httpsPort = 443
@@ -106,7 +107,7 @@ func Start(o Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading the leaf certificate: %w", err)
 	}
-	front, err := net.Listen("tcp", net.JoinHostPort(loopback, strconv.Itoa(o.Port)))
+	front, err := net.Listen("tcp", net.JoinHostPort(Loopback, strconv.Itoa(o.Port)))
 	if err != nil {
 		return nil, err
 	}

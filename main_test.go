@@ -426,3 +426,32 @@ func TestLoginWritesAConfigDirectoryAndRecordsIt(t *testing.T) {
 		t.Errorf("stdout %q, want none", f.stdout)
 	}
 }
+
+func TestEnvPrintsTheVariablesAndRecordsThem(t *testing.T) {
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "claude")
+	if err := os.Mkdir(cfg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := run(t, "env", "--port", "4040", "--ca", ca, "--config-dir", cfg)
+	if f.exit != 0 {
+		t.Fatalf("exit %d, record %v", f.exit, f.record)
+	}
+	if !strings.Contains(f.stdout, "HTTPS_PROXY=http://127.0.0.1:4040\n") || !strings.Contains(f.stdout, "CLAUDE_CONFIG_DIR="+cfg+"\n") {
+		t.Errorf("stdout %q", f.stdout)
+	}
+	if facts := f.record["facts"].(map[string]any); facts["port"] != float64(4040) || facts["config_dir"] != cfg {
+		t.Errorf("facts %v", facts)
+	}
+}
+
+func TestEnvWithoutItsFlagsIsAUsageRecord(t *testing.T) {
+	f := run(t, "env")
+	if f.exit != 2 || f.stdout != "" {
+		t.Errorf("exit %d, stdout %q; want 2 and nothing", f.exit, f.stdout)
+	}
+	expect(t, f.record, map[string]any{"outcome": "usage", "exit": 2, "why": "missing --port", "ended_by": nil})
+}

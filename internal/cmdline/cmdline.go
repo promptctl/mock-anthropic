@@ -7,10 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 )
@@ -99,18 +103,76 @@ func Absolute(given, text string) (string, error) {
 	return path, nil
 }
 
-// Directory is a command-line path that must name a directory there now.
-func Directory(given, text string) (string, error) {
+// stat is the absolute path of a command-line path and what is there now.
+func stat(given, text string) (string, os.FileInfo, error) {
 	path, err := Absolute(given, text)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", &command.UsageError{Why: fmt.Sprintf("%s %s: %v", given, path, errors.Unwrap(err))}
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return "", nil, &command.UsageError{Why: fmt.Sprintf("%s %s: %v", given, path, err)}
+	}
+	return path, info, nil
+}
+
+// Directory is a command-line path that must name a directory there now.
+func Directory(given, text string) (string, error) {
+	path, info, err := stat(given, text)
+	if err != nil {
+		return "", err
 	}
 	if !info.IsDir() {
 		return "", &command.UsageError{Why: fmt.Sprintf("%s %s: not a directory", given, path)}
 	}
 	return path, nil
+}
+
+// File is a command-line path that must name a regular file there now.
+func File(given, text string) (string, error) {
+	path, info, err := stat(given, text)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", &command.UsageError{Why: fmt.Sprintf("%s %s: not a file", given, path)}
+	}
+	return path, nil
+}
+
+// ConfigDirectory is a CLAUDE_CONFIG_DIR given on a command line: an existing directory, NFC-normalized
+// as Claude Code reads the variable (utils/envUtils.ts:7), so every command names it by one string.
+func ConfigDirectory(given, text string) (string, error) {
+	path, err := Directory(given, text)
+	if err != nil {
+		return "", err
+	}
+	return norm.NFC.String(path), nil
+}
+
+// ConfigPath is a CLAUDE_CONFIG_DIR that need not exist yet (login creates it), normalized as above.
+func ConfigPath(given, text string) (string, error) {
+	path, err := Absolute(given, text)
+	if err != nil {
+		return "", err
+	}
+	return norm.NFC.String(path), nil
+}
+
+var portText = regexp.MustCompile(`^\d{1,5}$`)
+
+// Port is a port number given as text, from min to 65535.
+func Port(given, text string, min int) (int, error) {
+	n := 0
+	if portText.MatchString(text) {
+		n, _ = strconv.Atoi(text) // one to five digits: cannot fail
+	}
+	if !portText.MatchString(text) || n < min || n > 65535 {
+		return 0, &command.UsageError{Why: fmt.Sprintf("%s %q: not a port number from %d to 65535", given, text, min)}
+	}
+	return n, nil
 }
