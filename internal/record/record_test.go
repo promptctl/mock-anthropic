@@ -19,6 +19,7 @@ import (
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
+	"github.com/promptctl/mock-anthropic/internal/generator"
 	"github.com/promptctl/mock-anthropic/internal/recording"
 	"github.com/promptctl/mock-anthropic/internal/server"
 )
@@ -276,5 +277,37 @@ func TestAnUpstreamThatCannotBeReachedFailsTheRequest(t *testing.T) {
 func TestTheProductionTransportIgnoresTheProxyEnvironment(t *testing.T) {
 	if Transport().(*http.Transport).Proxy != nil {
 		t.Error("the production transport consults a proxy; HTTPS_PROXY points at this very mock")
+	}
+}
+
+func TestCleanDropsTheHeadersConnectionNames(t *testing.T) {
+	h := http.Header{"Connection": {"keep-alive, X-Hop"}, "X-Hop": {"1"}, "X-Keep": {"2"}}
+	got := clean(h)
+	if got.Get("X-Hop") != "" || got.Get("X-Keep") != "2" {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestAClientThatLeavesMidReadIsAbandonmentNotAnUpstreamFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tm := &tee{ctx: ctx, rc: &Recorder{Totals: &Totals{}}, facts: generator.Facts{}, upstream: io.NopCloser(errReader{context.Canceled})}
+	tm.Read(make([]byte, 8))
+	tm.Close()
+	if tm.rc.Totals.Failed.Load() != 0 || tm.rc.Totals.Skipped.Load() != 1 {
+		t.Errorf("failed %d skipped %d", tm.rc.Totals.Failed.Load(), tm.rc.Totals.Skipped.Load())
+	}
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+func TestAnUnreachableUpstreamFailsOnlyMessagesRequests(t *testing.T) {
+	r := start(t)
+	r.up.srv.Close()
+	r.post(t, "/api/event_logging/batch", `{}`, nil)
+	if r.totals.Failed.Load() != 0 || r.totals.Skipped.Load() != 1 {
+		t.Errorf("failed %d skipped %d", r.totals.Failed.Load(), r.totals.Skipped.Load())
 	}
 }

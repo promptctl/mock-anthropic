@@ -89,3 +89,35 @@ func TestParseRefusesWhatIsNotARecording(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadOrdersByNumberNotByText(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"9999", "10000"} {
+		body := `{"version":1,"request":` + oneReq + `,"reply":` + strings.Replace(oneReply, `"hi"`, `"`+n+`"`, 1) + `}`
+		if err := os.WriteFile(filepath.Join(dir, n+".json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Load(dir)
+	if err != nil || len(got) != 2 || !strings.Contains(string(got[0].Reply), "9999") {
+		t.Fatalf("Load: %v, %d exchanges, first %s", err, len(got), got[0].Reply)
+	}
+}
+
+func TestAFailedWriteLeavesNoFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if _, err := w.Save(scrubbedFixture(t)); err == nil {
+		t.Skip("directory permissions not enforced here")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("left %d files", len(entries))
+	}
+}

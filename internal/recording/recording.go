@@ -5,12 +5,14 @@ package recording
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -88,24 +90,33 @@ func (e Exchange) marshal() ([]byte, error) {
 
 var fileName = regexp.MustCompile(`^(\d{4,})\.json$`)
 
-// Load reads every recording in dir, in file-name order.
+// Load reads every recording in dir, in numbered order.
 func Load(dir string) ([]Exchange, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	var out []Exchange
+	var names []string
 	for _, entry := range entries {
-		if !fileName.MatchString(entry.Name()) {
-			continue
+		if fileName.MatchString(entry.Name()) {
+			names = append(names, entry.Name())
 		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+	}
+	// The number, not the text: 10000.json follows 9999.json.
+	slices.SortFunc(names, func(a, b string) int {
+		x, _ := strconv.Atoi(fileName.FindStringSubmatch(a)[1])
+		y, _ := strconv.Atoi(fileName.FindStringSubmatch(b)[1])
+		return cmp.Compare(x, y)
+	})
+	var out []Exchange
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
 		e, err := Parse(data)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, entry.Name()), err)
+			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
 		}
 		out = append(out, e)
 	}
@@ -160,7 +171,8 @@ func (w *Writer) Save(s Scrubbed) (string, error) {
 			werr = cerr
 		}
 		if werr != nil {
-			return "", werr
+			// A truncated file would make the whole directory unloadable.
+			return "", errors.Join(werr, os.Remove(filepath.Join(w.dir, name)))
 		}
 		return name, nil
 	}

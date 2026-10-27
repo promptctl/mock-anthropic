@@ -181,3 +181,15 @@ func TestScrubRefusesWhatItCannotMakeClean(t *testing.T) {
 		t.Errorf("two keys that scrub alike: %v", err)
 	}
 }
+
+func TestScrubLeavesPackageVersionsAlone(t *testing.T) {
+	req := `{"model":"m","messages":[{"role":"user","content":"npm i lodash@4.17.21 and mail me@example.com"}]}`
+	s, counts, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustMarshal(t, s.exchange))
+	if !strings.Contains(out, "lodash@4.17.21") || strings.Contains(out, "me@example.com") || counts[Email] != 1 {
+		t.Errorf("%s %v", out, counts)
+	}
+}

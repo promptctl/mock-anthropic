@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/builtin"
@@ -38,13 +40,26 @@ type Recorder struct {
 // Transport is the production upstream. [LAW:no-silent-failure] Proxy is nil on purpose: `env` points
 // HTTPS_PROXY at this very mock, and a forwarder that obeyed it would send every request back to itself.
 func Transport() http.RoundTripper {
-	return &http.Transport{Proxy: nil, DisableCompression: true}
+	return &http.Transport{
+		Proxy:               nil,
+		DisableCompression:  true,
+		DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConnsPerHost: 4,
+	}
 }
 
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
+// clean drops the hop-by-hop headers, and the ones the Connection header names (RFC 9110 7.6.1).
 func clean(h http.Header, extra ...string) http.Header {
 	out := h.Clone()
+	for _, v := range h.Values("Connection") {
+		for _, name := range strings.Split(v, ",") {
+			out.Del(strings.TrimSpace(name))
+		}
+	}
 	for _, k := range append(hopByHop, extra...) {
 		out.Del(k)
 	}
@@ -57,17 +72,17 @@ func (rc *Recorder) Handle(ctx context.Context, resolution endpoint.Resolution, 
 	target := *r.URL
 	req, err := http.NewRequestWithContext(ctx, r.Method, target.String(), bytes.NewReader(r.Body))
 	if err != nil {
-		rc.Totals.Failed.Add(1)
+		rc.countFailure(resolution, miss)
 		return dispatch.Fail(r, "building the upstream request: "+err.Error(), facts)
 	}
 	// Accept-Encoding is dropped so the body arrives as text the recorder can read.
 	req.Header = clean(r.Header, "Accept-Encoding")
 	res, err := rc.Upstream.RoundTrip(req)
 	if err != nil {
-		rc.Totals.Failed.Add(1)
+		rc.countFailure(resolution, miss)
 		return dispatch.Fail(r, "upstream: "+err.Error(), facts)
 	}
-	t := &tee{rc: rc, upstream: res.Body, facts: facts, status: res.StatusCode, contentType: res.Header.Get("Content-Type"), request: r.Body}
+	t := &tee{ctx: ctx, rc: rc, upstream: res.Body, facts: facts, status: res.StatusCode, contentType: res.Header.Get("Content-Type"), request: r.Body}
 	t.kind = rc.classify(resolution, miss, r, res.StatusCode)
 	for _, k := range []string{"Authorization", "X-Api-Key"} {
 		if v := r.Header.Get(k); v != "" {
@@ -81,11 +96,25 @@ func (rc *Recorder) Handle(ctx context.Context, resolution endpoint.Resolution, 
 	}
 }
 
+// countFailure counts a request that never reached the real host: a failure only if it was a Messages
+// request, which is what the run exists to save; any other is skipped, as when it is answered.
+func (rc *Recorder) countFailure(resolution endpoint.Resolution, miss error) {
+	if notMessages(resolution, miss) {
+		rc.Totals.Skipped.Add(1)
+		return
+	}
+	rc.Totals.Failed.Add(1)
+}
+
+func notMessages(resolution endpoint.Resolution, miss error) bool {
+	return miss != nil || resolution.Endpoint.ID() != "messages"
+}
+
 // classify decides before the body is read whether this exchange could be saved; a non-nil skip is its reason.
 func (rc *Recorder) classify(resolution endpoint.Resolution, miss error, r generator.Request, status int) *string {
 	skip := func(why string) *string { return &why }
 	switch {
-	case miss != nil || resolution.Endpoint.ID() != "messages":
+	case notMessages(resolution, miss):
 		return skip("not a Messages request")
 	case status < 200 || status > 299:
 		return skip(fmt.Sprintf("upstream answered %d", status))
@@ -101,6 +130,7 @@ func (rc *Recorder) classify(resolution endpoint.Resolution, miss error, r gener
 // tee passes the upstream body to the client and keeps a copy. Close, which the server calls once on
 // every path, is where the exchange is finished: saved, skipped, refused or failed.
 type tee struct {
+	ctx         context.Context
 	rc          *Recorder
 	upstream    io.ReadCloser
 	facts       generator.Facts
@@ -116,10 +146,14 @@ type tee struct {
 
 func (t *tee) Read(p []byte) (int, error) {
 	n, err := t.upstream.Read(p)
-	t.copy.Write(p[:n])
+	if t.kind == nil {
+		t.copy.Write(p[:n])
+	}
 	switch {
 	case err == io.EOF:
 		t.finished = true
+	case err != nil && t.ctx.Err() != nil:
+		// The client went away and cancelled the upstream read: abandonment, not an upstream failure.
 	case err != nil:
 		t.readErr = err
 	}

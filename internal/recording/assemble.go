@@ -240,6 +240,8 @@ func events(body []byte, fn func(data []byte) error) error {
 			if ferr := flush(); ferr != nil {
 				return ferr
 			}
+		case bytes.Equal(line, []byte("data")):
+			data = append(data, nil)
 		case bytes.HasPrefix(line, []byte("data:")):
 			data = append(data, bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte(" ")))
 		}

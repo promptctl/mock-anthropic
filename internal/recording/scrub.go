@@ -39,7 +39,7 @@ const minSecret = 8
 
 var (
 	credentialShape = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{16,}`)
-	emailShape      = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	emailShape      = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
 	userHashShape   = regexp.MustCompile(`user_[0-9a-f]{64}`)
 	hex64           = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	accountContext  = regexp.MustCompile(`(?i)(_account_)(` + account.UUIDPattern + `)`)

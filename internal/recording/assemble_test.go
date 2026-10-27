@@ -96,3 +96,11 @@ func TestAssembleNamesAStreamCutShort(t *testing.T) {
 		t.Errorf("a stream without message_stop: %v", err)
 	}
 }
+
+func TestEventsReadsABareDataLineAsAnEmptyOne(t *testing.T) {
+	var got []string
+	err := events([]byte("data: a\ndata\ndata: b\n\n"), func(d []byte) error { got = append(got, string(d)); return nil })
+	if err != nil || len(got) != 1 || got[0] != "a\n\nb" {
+		t.Errorf("%q %v", got, err)
+	}
+}
