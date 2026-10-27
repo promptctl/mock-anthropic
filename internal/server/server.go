@@ -458,29 +458,41 @@ func parsePort(text string) (int, bool) {
 }
 
 // unwritable is why a response cannot be written, or "": a status that is not a final one, no body, or
-// framing headers net/http would rewrite, logging it, so the client would get another response than
-// the handler gave.
+// framing net/http would rewrite, so the client would get another response than the handler gave.
+// [LAW:single-enforcer] Framing is net/http's: a handler names no Transfer-Encoding, and at most one
+// Content-Length, a length as net/http parses it. r's header is canonical, the one writeHeader sends.
 func unwritable(r generator.Response) string {
-	// Canonical keys, as writeHeader sends them.
-	header := http.Header{}
-	for k, vs := range r.Header {
-		for _, v := range vs {
-			header.Add(k, v)
-		}
-	}
-	length := header.Get("Content-Length")
-	_, lengthErr := strconv.ParseUint(length, 10, 63)
+	lengths := r.Header["Content-Length"]
 	switch {
 	case r.Status < 200 || r.Status > 999:
 		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
 	case r.Body == nil:
 		return "a response with no body"
-	case length != "" && header.Get("Transfer-Encoding") != "":
-		return "both Transfer-Encoding and Content-Length"
-	case length != "" && lengthErr != nil:
-		return fmt.Sprintf("Content-Length %q, not a length", length)
+	case len(r.Header["Transfer-Encoding"]) > 0:
+		return "a Transfer-Encoding, which is net/http's to set"
+	case len(lengths) > 1:
+		return fmt.Sprintf("Content-Length %q, more than one", lengths)
+	case len(lengths) == 1 && !isLength(lengths[0]):
+		return fmt.Sprintf("Content-Length %q, not a length", lengths[0])
 	}
 	return ""
+}
+
+func isLength(text string) bool {
+	n, err := strconv.ParseInt(text, 10, 64)
+	return err == nil && n >= 0
+}
+
+// canonical is h with each key as net/http spells it, built once so the header unwritable checks is
+// the header writeHeader sends.
+func canonical(h http.Header) http.Header {
+	c := http.Header{}
+	for k, vs := range h {
+		for _, v := range vs {
+			c.Add(k, v)
+		}
+	}
+	return c
 }
 
 // clientConn is one accepted connection. It records who ended it: the mock's Stop, the client (its
@@ -686,6 +698,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// [LAW:single-enforcer] Every Handler's response passes here, so a response the server cannot
 	// write is caught here, before its status is committed: the mock's own bug, a 500 that names it.
+	d.Response.Header = canonical(d.Response.Header)
 	if why := unwritable(d.Response); why != "" {
 		why = "the handler gave " + why
 		d = dispatch.Fail(req, why, d.Facts)
