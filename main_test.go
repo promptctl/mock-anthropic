@@ -405,3 +405,24 @@ func TestCoverageExitsOneExactlyWhenThereAreGaps(t *testing.T) {
 		t.Errorf("stdout lists no answered endpoint: %q", f.stdout)
 	}
 }
+
+// login as a consumer meets it: registered, its files on disk, and its record naming what it did.
+func TestLoginWritesAConfigDirectoryAndRecordsIt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "claude")
+	f := run(t, "login", dir)
+	if f.exit != 0 {
+		t.Fatalf("exit %d, record %v", f.exit, f.record)
+	}
+	facts := f.record["facts"].(map[string]any)
+	if facts["config_dir"] != dir || facts["config_dir_created"] != true {
+		t.Errorf("facts %v", facts)
+	}
+	for _, name := range []string{".credentials.json", ".claude.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Error(err)
+		}
+	}
+	if f.stdout != "" {
+		t.Errorf("stdout %q, want none", f.stdout)
+	}
+}
