@@ -67,15 +67,13 @@ func TestAnArgumentIsAWrongCommandLine(t *testing.T) {
 	}
 }
 
-// The real table: until the Messages generator lands (mock mock-flu.coa.c0w), its row is the one gap.
-// Then this becomes the PROJECT.md acceptance: coverage exits 0.
-func TestRealTableGapsAreOnlyTheMessagesRow(t *testing.T) {
+// The real table is PROJECT.md's acceptance: every in-scope endpoint has a generator, so coverage has no gaps.
+func TestRealTableHasNoGaps(t *testing.T) {
 	res, err := Command(new(strings.Builder)).Run(context.Background(), nil, func(error) {}, func(command.Facts) {})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gaps := res.Facts["gaps"].([]string)
-	if want := []string{"messages"}; !slices.Equal(gaps, want) {
-		t.Errorf("gaps %v, want %v", gaps, want)
+	if gaps := res.Facts["gaps"].([]string); len(gaps) != 0 {
+		t.Errorf("gaps %v, want none", gaps)
 	}
 }

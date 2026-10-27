@@ -455,3 +455,53 @@ func TestEnvWithoutItsFlagsIsAUsageRecord(t *testing.T) {
 	}
 	expect(t, f.record, map[string]any{"outcome": "usage", "exit": 2, "why": "missing --port", "ended_by": nil})
 }
+
+// The Messages generator as a consumer meets it: scripts in a --scenarios directory answer over HTTP
+// with the framing the server enforces, and a bad script fails the request with a FAILED line.
+func TestServeAnswersMessagesFromScripts(t *testing.T) {
+	dir := t.TempDir()
+	scripts := map[string]string{
+		"1-limit.json": `{"match":{"lastUserContains":["limit"]},"reply":{"kind":"literal","status":429,"headers":{"retry-after":"7"},"body":"{\"type\":\"error\"}"}}`,
+		"2-tool.json":  `{"reply":{"kind":"message","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}],"stop_reason":"tool_use"}}`,
+	}
+	for name, text := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mock := startServe(t, "--scenarios", dir)
+	post := func(text string) (*http.Response, string) {
+		request := fmt.Sprintf(`{"model":"m","max_tokens":10,"stream":true,"messages":[{"role":"user","content":%q}]}`, text)
+		response, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/messages", mock.port()), "application/json", strings.NewReader(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response, string(body)
+	}
+	limited, body := post("hit the limit")
+	if limited.StatusCode != 429 || limited.Header.Get("Retry-After") != "7" || body != `{"type":"error"}` {
+		t.Errorf("429: %d %v %q", limited.StatusCode, limited.Header, body)
+	}
+	tool, body := post("list it")
+	if tool.StatusCode != 200 || tool.Header.Get("Content-Type") != "text/event-stream; charset=utf-8" ||
+		!strings.Contains(body, "event: content_block_delta\ndata: ") || !strings.Contains(body, `"type":"input_json_delta"`) || !strings.HasSuffix(body, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n") {
+		t.Errorf("tool_use: %d %v %q", tool.StatusCode, tool.Header, body)
+	}
+	bad := filepath.Join(dir, "3-bad.json")
+	if err := os.WriteFile(bad, []byte(`{`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failed, body := post("hit the limit")
+	if failed.StatusCode != 500 || !strings.Contains(body, bad) {
+		t.Errorf("bad script: %d %q", failed.StatusCode, body)
+	}
+	result := mock.stop(t, syscall.SIGINT)
+	if !strings.Contains(strings.Join(result.stderr, "\n"), "FAILED") || !strings.Contains(strings.Join(result.stderr, "\n"), bad) {
+		t.Errorf("stderr lacks a FAILED line naming %s: %q", bad, result.stderr)
+	}
+}

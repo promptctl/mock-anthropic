@@ -3,6 +3,7 @@ package endpoint
 import (
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/accountgen"
+	"github.com/promptctl/mock-anthropic/internal/messagesgen"
 	"github.com/promptctl/mock-anthropic/internal/servicegen"
 )
 
@@ -39,11 +40,11 @@ const (
 // [LAW:one-source-of-truth] The one declaration of the table; an in-scope row still given nil has no
 // generator yet, which is what `coverage` reports. Each generator derived from the account is the
 // named field of its row.
-func Rows(a account.Account) []Row {
+func Rows(a account.Account, scenarios []string) []Row {
 	g := accountgen.New(a)
 	s := servicegen.New()
 	return []Row{
-		InScope("messages", API, "POST", "/v1/messages", nil),
+		InScope("messages", API, "POST", "/v1/messages", messagesgen.New(scenarios, nil)),
 		InScope("messages-count-tokens", API, "POST", "/v1/messages/count_tokens", s.CountTokens),
 		InScope("oauth-profile", API, "GET", "/api/oauth/profile", g.Profile),
 		InScope("oauth-roles", API, "GET", "/api/oauth/claude_cli/roles", g.Roles),

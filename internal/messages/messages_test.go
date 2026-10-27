@@ -7,8 +7,8 @@ import (
 
 func TestTokensCountsUTF16UnitsAtFourToAToken(t *testing.T) {
 	for text, want := range map[string]int{"": 0, "abcd": 1, "abcde": 2, "😀😀": 1, "😀😀a": 2} {
-		if got := tokens(text); got != want {
-			t.Errorf("tokens(%q) = %d, want %d", text, got, want)
+		if got := Tokens(text); got != want {
+			t.Errorf("Tokens(%q) = %d, want %d", text, got, want)
 		}
 	}
 }
