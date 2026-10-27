@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,13 +32,17 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request and one per connection, from many goroutines at once.
+// request and one per connection, from many goroutines at once. Log receives each line net/http
+// logs about a response it still answered. Crash receives what fails in the server's own goroutines,
+// outside any request: an accept failing before Stop.
 type Options struct {
 	Port     int
 	Table    *endpoint.Table
 	Handle   dispatch.Handler
 	CertsDir string
 	Emit     func(Event)
+	Log      io.Writer
+	Crash    func(error)
 }
 
 // Server is a started mock. Stop ends it.
@@ -45,6 +50,7 @@ type Server struct {
 	table        *endpoint.Table
 	handle       dispatch.Handler
 	emit         func(Event)
+	crash        func(error)
 	certificates certificate.Certificates
 	tls          *tls.Config
 	front        net.Listener
@@ -90,6 +96,9 @@ var requestLine = regexp.MustCompile(`^([A-Z]+) (\S+) HTTP/1\.[01]\r$`)
 // Start listens and serves until Stop. The leaf certificate covers exactly the hosts the table names,
 // the hosts it accepts CONNECT for: [LAW:one-source-of-truth] both are read from the one table.
 func Start(o Options) (*Server, error) {
+	if o.Emit == nil || o.Log == nil || o.Crash == nil {
+		return nil, errors.New("server options need Emit, Log, and Crash")
+	}
 	certs, err := certificate.Ensure(o.CertsDir, o.Table.Hosts())
 	if err != nil {
 		return nil, err
@@ -106,6 +115,7 @@ func Start(o Options) (*Server, error) {
 		table:        o.Table,
 		handle:       o.Handle,
 		emit:         o.Emit,
+		crash:        o.Crash,
 		certificates: certs,
 		// HTTP/1.1 only: every connection is served by net/http's HTTP/1 server, which counts and
 		// records its requests.
@@ -116,6 +126,8 @@ func Start(o Options) (*Server, error) {
 	}
 	s.inner = &http.Server{
 		Handler: s,
+		// [LAW:single-enforcer] net/http's own lines go through the invocation's log, like every record.
+		ErrorLog: log.New(o.Log, "", 0),
 		// net/http is done with a connection, its last handler returned, once it reports it closed.
 		ConnState: func(c net.Conn, state http.ConnState) {
 			if state == http.StateClosed {
@@ -174,7 +186,7 @@ func (s *Server) accept() {
 		if err != nil {
 			// Only Stop closes the listener; any other accept error ends serving, and is the mock's.
 			if !s.isStopping() {
-				panic(fmt.Sprintf("accepting connections: %v", err))
+				s.crash(fmt.Errorf("accepting connections: %w", err))
 			}
 			return
 		}
