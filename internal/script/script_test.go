@@ -294,6 +294,9 @@ func TestAMalformedScriptFailsNamingItsPath(t *testing.T) {
 		"no body":                          {m{"reply": m{"kind": "literal", "status": 500}}, "reply: body: required"},
 		"tool input that is not an object": {m{"reply": tool("ls", "Bash")}, "reply: content[0]: input"},
 		"a tool call with no name":         {m{"reply": tool(m{}, "")}, "reply: content[0]: name"},
+		"a tool name the API refuses":      {m{"reply": tool(m{}, "my tool")}, "reply: content[0]: name"},
+		"a framing header":                 {m{"reply": lit(m{"headers": m{"Content-Length": "5"}})}, "the mock frames the response itself"},
+		"the first of two bad keys":        {m{"reply": msg(m{"b": 1, "a": 1})}, `Unrecognized key: "a"`},
 	}
 	for what, c := range bad {
 		t.Run(what, func(t *testing.T) {
@@ -376,5 +379,14 @@ func TestAScriptRemovedAfterTheListingIsNotAScript(t *testing.T) {
 	text, err := readRegularFile(path)
 	if text != nil || err != nil {
 		t.Errorf("%q, %v", text, err)
+	}
+}
+
+func TestAHeaderNamedThreeTimesIsListedOnce(t *testing.T) {
+	d := t.TempDir()
+	write(t, d, "bad.json", m{"reply": m{"kind": "literal", "status": 429, "body": "", "headers": m{"X-A": "1", "x-a": "2", "X-a": "3"}}})
+	_, err := InOrder([]string{d}, nil)
+	if err == nil || !strings.HasSuffix(err.Error(), "names a field twice: x-a") {
+		t.Errorf("%v", err)
 	}
 }

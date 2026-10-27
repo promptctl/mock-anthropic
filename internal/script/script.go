@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -271,10 +274,14 @@ func (f *file) parseMatch(raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	for key, into := range map[string]*[]string{"bodyContains": &f.bodyContains, "lastUserContains": &f.lastUserContains} {
-		if raw, ok := m[key]; ok {
-			if *into, err = needles(raw); err != nil {
-				return fmt.Errorf("%s: %w", key, err)
+	// A slice, not a map: the first bad needle named is the same on every run.
+	for _, field := range []struct {
+		key  string
+		into *[]string
+	}{{"bodyContains", &f.bodyContains}, {"lastUserContains", &f.lastUserContains}} {
+		if raw, ok := m[field.key]; ok {
+			if *field.into, err = needles(raw); err != nil {
+				return fmt.Errorf("%s: %w", field.key, err)
 			}
 		}
 	}
@@ -321,7 +328,8 @@ func parseReply(raw json.RawMessage) (Reply, error) {
 	return nil, fmt.Errorf(`kind: expected "message" or "literal", got %q`, kind)
 }
 
-// A timer holds at most 2^31 - 1 ms and fires a longer delay after 1 ms, so a longer one is refused.
+// An arbitrary ceiling (about 24 days per event), far inside what time.Duration holds, so a mistyped
+// delay is an error at load instead of a response that never ends.
 const maxDelayMs = 1<<31 - 1
 
 func parseMessage(raw json.RawMessage) (Reply, error) {
@@ -367,6 +375,9 @@ func parseMessage(raw json.RawMessage) (Reply, error) {
 	return reply, nil
 }
 
+// The API's rule for a tool's name.
+var toolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
 func parseBlock(raw json.RawMessage) (Block, error) {
 	var peek map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &peek); err != nil {
@@ -403,8 +414,8 @@ func parseBlock(raw json.RawMessage) (Block, error) {
 			return nil, err
 		}
 		name, err := str(o["name"])
-		if err == nil && name == "" {
-			err = errors.New("expected a non-empty string")
+		if err == nil && !toolName.MatchString(name) {
+			err = errors.New("expected 1 to 64 letters, digits, underscores or hyphens")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("name: %w", err)
@@ -456,10 +467,15 @@ func parseHeaders(raw json.RawMessage, into http.Header) error {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return errors.New("expected an object of strings")
 	}
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	seen := map[string]bool{}
 	repeated := []string{}
-	for name, rawValue := range fields {
-		value, err := str(rawValue)
+	for _, name := range names {
+		value, err := str(fields[name])
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
@@ -470,7 +486,10 @@ func parseHeaders(raw json.RawMessage, into http.Header) error {
 			return fmt.Errorf("%s: invalid value %q", name, value)
 		}
 		lower := strings.ToLower(name)
-		if seen[lower] {
+		if framing[lower] {
+			return fmt.Errorf("%s: the mock frames the response itself", name)
+		}
+		if seen[lower] && !slices.Contains(repeated, lower) {
 			repeated = append(repeated, lower)
 		}
 		seen[lower] = true
@@ -481,6 +500,10 @@ func parseHeaders(raw json.RawMessage, into http.Header) error {
 	}
 	return nil
 }
+
+// Headers that describe how the body is carried: the server sets them from the body it writes, so a
+// script's own would contradict it.
+var framing = map[string]bool{"content-length": true, "transfer-encoding": true, "connection": true, "trailer": true, "upgrade": true}
 
 // A field name is a token (RFC 9110 5.6.2).
 func validName(name string) bool {
@@ -514,21 +537,17 @@ func object(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage,
 	if raw == nil || json.Unmarshal(raw, &o) != nil || o == nil {
 		return nil, errors.New("expected an object")
 	}
+	keys := make([]string, 0, len(o))
 	for key := range o {
-		if len(allowed) > 0 && !contains(allowed, key) {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if len(allowed) > 0 && !slices.Contains(allowed, key) {
 			return nil, fmt.Errorf("Unrecognized key: %q", key)
 		}
 	}
 	return o, nil
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // str is raw as a JSON string; absent (nil) and null are not one.

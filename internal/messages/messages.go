@@ -102,9 +102,12 @@ func ParseRequest(raw []byte) (Request, error) {
 	return r, nil
 }
 
+// absent is an optional field left out or sent as null, which the API reads alike.
+func absent(raw json.RawMessage) bool { return raw == nil || bytes.Equal(raw, []byte("null")) }
+
 // systemTexts is a checked system prompt as texts: a string is one, and a list of text blocks is one each.
 func systemTexts(raw json.RawMessage) []string {
-	if raw == nil {
+	if absent(raw) {
 		return []string{}
 	}
 	return contentTexts(raw)
@@ -191,7 +194,7 @@ func checkBase(model, system, messages json.RawMessage) error {
 	if err := json.Unmarshal(model, &name); err != nil || name == "" {
 		return errors.New("model: expected a non-empty string")
 	}
-	if system != nil {
+	if !absent(system) {
 		if err := checkSystem(system); err != nil {
 			return fmt.Errorf("system: %w", err)
 		}

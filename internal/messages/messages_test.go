@@ -53,6 +53,9 @@ func TestParseRequestReadsTheTextsAScriptMatches(t *testing.T) {
 }
 
 func TestParseRequestDefaultsAndRefusals(t *testing.T) {
+	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, `,"system":null`)); err != nil || len(r.SystemTexts) != 0 {
+		t.Errorf("a null system is a missing one: %+v, %v", r, err)
+	}
 	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, ``)); err != nil || r.Stream || len(r.SystemTexts) != 0 {
 		t.Errorf("%+v, %v", r, err)
 	}
