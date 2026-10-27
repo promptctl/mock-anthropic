@@ -32,16 +32,15 @@ import (
 
 // Options are what a server is started from. Handle answers every request; dispatch.Dispatch answers
 // from the table's generators, and record mode forwards instead. Emit receives every record, one per
-// request and one per connection, from many goroutines at once. Log receives each line net/http
-// logs about a response it still answered. Crash receives what fails in the server's own goroutines,
-// outside any request: an accept failing before Stop.
+// request, one per connection, and one per message net/http logs, from many goroutines at once. Crash
+// receives what fails in the server's own goroutines, outside any request: an accept failing before
+// Stop.
 type Options struct {
 	Port     int
 	Table    *endpoint.Table
 	Handle   dispatch.Handler
 	CertsDir string
 	Emit     func(Event)
-	Log      io.Writer
 	Crash    func(error)
 }
 
@@ -96,8 +95,8 @@ var requestLine = regexp.MustCompile(`^([A-Z]+) (\S+) HTTP/1\.[01]\r$`)
 // Start listens and serves until Stop. The leaf certificate covers exactly the hosts the table names,
 // the hosts it accepts CONNECT for: [LAW:one-source-of-truth] both are read from the one table.
 func Start(o Options) (*Server, error) {
-	if o.Emit == nil || o.Log == nil || o.Crash == nil {
-		return nil, errors.New("server options need Emit, Log, and Crash")
+	if o.Emit == nil || o.Crash == nil {
+		return nil, errors.New("server options need Emit and Crash")
 	}
 	certs, err := certificate.Ensure(o.CertsDir, o.Table.Hosts())
 	if err != nil {
@@ -126,8 +125,8 @@ func Start(o Options) (*Server, error) {
 	}
 	s.inner = &http.Server{
 		Handler: s,
-		// [LAW:single-enforcer] net/http's own lines go through the invocation's log, like every record.
-		ErrorLog: log.New(o.Log, "", 0),
+		// [LAW:single-enforcer] net/http's own lines are records, emitted like every other.
+		ErrorLog: log.New(serverLog(o.Emit), "", 0),
 		// net/http is done with a connection, its last handler returned, once it reports it closed.
 		ConnState: func(c net.Conn, state http.ConnState) {
 			if state == http.StateClosed {
@@ -458,15 +457,42 @@ func parsePort(text string) (int, bool) {
 	return n, n <= 65535
 }
 
-// unwritable is why a response cannot be written, or "": a status that is not a final one, or no body.
+// unwritable is why a response cannot be written, or "": a status that is not a final one, no body, or
+// framing net/http would rewrite, so the client would get another response than the handler gave.
+// [LAW:single-enforcer] Framing is net/http's: a handler names no Transfer-Encoding, and at most one
+// Content-Length, a length as net/http parses it. r's header is canonical, the one writeHeader sends.
 func unwritable(r generator.Response) string {
+	lengths := r.Header["Content-Length"]
 	switch {
 	case r.Status < 200 || r.Status > 999:
 		return fmt.Sprintf("status %d, not a final HTTP status", r.Status)
 	case r.Body == nil:
 		return "a response with no body"
+	case len(r.Header["Transfer-Encoding"]) > 0:
+		return "a Transfer-Encoding, which is net/http's to set"
+	case len(lengths) > 1:
+		return fmt.Sprintf("Content-Length %q, more than one", lengths)
+	case len(lengths) == 1 && !isLength(lengths[0]):
+		return fmt.Sprintf("Content-Length %q, not a length", lengths[0])
 	}
 	return ""
+}
+
+func isLength(text string) bool {
+	n, err := strconv.ParseInt(text, 10, 64)
+	return err == nil && n >= 0
+}
+
+// canonical is h with each key as net/http spells it, built once so the header unwritable checks is
+// the header writeHeader sends.
+func canonical(h http.Header) http.Header {
+	c := http.Header{}
+	for k, vs := range h {
+		for _, v := range vs {
+			c.Add(k, v)
+		}
+	}
+	return c
 }
 
 // clientConn is one accepted connection. It records who ended it: the mock's Stop, the client (its
@@ -672,6 +698,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// [LAW:single-enforcer] Every Handler's response passes here, so a response the server cannot
 	// write is caught here, before its status is committed: the mock's own bug, a 500 that names it.
+	d.Response.Header = canonical(d.Response.Header)
 	if why := unwritable(d.Response); why != "" {
 		why = "the handler gave " + why
 		d = dispatch.Fail(req, why, d.Facts)

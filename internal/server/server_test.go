@@ -92,6 +92,15 @@ var table = func() *endpoint.Table {
 		endpoint.InScope("statusless", endpoint.API, "GET", "/v1/statusless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Response{Header: http.Header{}, Body: strings.NewReader("")}, Facts: generator.Facts{}}, nil
 		}),
+		endpoint.InScope("framed", endpoint.API, "GET", "/v1/framed", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"transfer-encoding": {"chunked"}, "content-length": {"2"}}, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("lengths", endpoint.API, "GET", "/v1/lengths", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"content-length": {"2", "3"}}, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}, nil
+		}),
+		endpoint.InScope("badlength", endpoint.API, "GET", "/v1/badlength", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
+			return generator.Answer{Reply: generator.Response{Status: 200, Header: http.Header{"Content-Length": {"two"}}, Body: strings.NewReader("ok")}, Facts: generator.Facts{}}, nil
+		}),
 		endpoint.InScope("reasonless", endpoint.API, "GET", "/v1/reasonless", func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 			return generator.Answer{Reply: generator.Declined{}, Facts: generator.Facts{}}, nil
 		}),
@@ -118,12 +127,13 @@ type harness struct {
 	server      *Server
 	requests    chan RequestEvent
 	connections chan ConnectionEvent
+	servers     chan ServerEvent
 	ca          *x509.CertPool
 }
 
 func start(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{requests: make(chan RequestEvent, 64), connections: make(chan ConnectionEvent, 64)}
+	h := &harness{requests: make(chan RequestEvent, 64), connections: make(chan ConnectionEvent, 64), servers: make(chan ServerEvent, 64)}
 	s, err := Start(Options{Table: table, Handle: dispatch.Dispatch, CertsDir: certsDir, Emit: func(e Event) {
 		if _, err := Line(e); err != nil {
 			t.Errorf("event %+v has no line: %v", e, err)
@@ -133,12 +143,21 @@ func start(t *testing.T) *harness {
 			h.requests <- e
 		case ConnectionEvent:
 			h.connections <- e
+		case ServerEvent:
+			h.servers <- e
 		}
-	}, Log: testLog{t}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
+	}, Crash: func(err error) { t.Errorf("crash: %v", err) }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.server = s
+	// A line net/http logs is a mock bug: a test that does not read it fails. Cleanups run last
+	// first, so this one runs after Stop, once every connection's lines are in.
+	t.Cleanup(func() {
+		for len(h.servers) > 0 {
+			t.Errorf("net/http logged: %+v", <-h.servers)
+		}
+	})
 	t.Cleanup(s.Stop)
 	pem, err := os.ReadFile(s.Certificates().CA.CertPath)
 	if err != nil {
@@ -302,10 +321,13 @@ func TestAFailingGeneratorGetsA500NamingIt(t *testing.T) {
 		"/v1/panics":     "generator panics panicked: kaboom",
 		"/v1/bodiless":   "the handler gave a response with no body",
 		"/v1/statusless": "the handler gave status 0, not a final HTTP status",
+		"/v1/framed":     "the handler gave a Transfer-Encoding, which is net/http's to set",
+		"/v1/lengths":    "the handler gave Content-Length [\"2\" \"3\"], more than one",
+		"/v1/badlength":  "the handler gave Content-Length \"two\", not a length",
 		"/v1/reasonless": "generator reasonless declined without saying why",
 	} {
 		res, body := do(t, c, "GET", "https://api.anthropic.com"+path, nil)
-		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, "mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why) {
+		if res.StatusCode != 500 || !strings.Contains(body, `"type":"api_error"`) || !strings.Contains(body, strings.ReplaceAll("mock-anthropic FAILED: GET api.anthropic.com "+path+": "+why, `"`, `\"`)) {
 			t.Errorf("%s: got %d %s", path, res.StatusCode, body)
 		}
 		if r := h.request(t); !strings.HasPrefix(lineOf(t, r), "FAILED {") || r.Why != why || *r.Status != 500 {
@@ -583,10 +605,19 @@ func TestStopEndsEveryUnitAndSaysSo(t *testing.T) {
 	}
 }
 
-// testLog fails the test on any line net/http logs: none of these tests gives it one.
-type testLog struct{ t *testing.T }
-
-func (l testLog) Write(p []byte) (int, error) {
-	l.t.Errorf("net/http logged: %s", p)
-	return len(p), nil
+// A message net/http logs is a mock bug, so it is a FAILED record through Emit, never raw text.
+// unwritable refuses every response net/http would log about, and ServeHTTP recovers every panic, so
+// no request provokes one: the test logs through the server's own ErrorLog.
+func TestNetHTTPLogLineIsAFailedRecord(t *testing.T) {
+	h := start(t)
+	h.server.inner.ErrorLog.Printf("http: panic serving %s: %s\n%s", "127.0.0.1:1", "kaboom", "goroutine 1 [running]:")
+	select {
+	case e := <-h.servers:
+		want := `FAILED {"event":"server","message":"http: panic serving 127.0.0.1:1: kaboom\ngoroutine 1 [running]:","outcome":"failed"}`
+		if got := lineOf(t, e); got != want {
+			t.Errorf("line %s, want %s", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no server record")
+	}
 }

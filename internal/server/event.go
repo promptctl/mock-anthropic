@@ -10,9 +10,9 @@ import (
 )
 
 // [LAW:nothing-unseen] One record per unit of work: each request and each connection, the plain ones,
-// the tunnels and the refused ones alike.
+// the tunnels and the refused ones alike; and one per message net/http logs, which no unit of ours owns.
 
-// Event is a RequestEvent or a ConnectionEvent.
+// Event is a RequestEvent, a ConnectionEvent, or a ServerEvent.
 type Event interface{ outcome() string }
 
 // RequestOutcome is how a request ended: its verdict, or Aborted when its connection ended first.
@@ -82,6 +82,30 @@ type ConnectionEvent struct {
 }
 
 func (e ConnectionEvent) outcome() string { return string(e.Outcome) }
+
+// ServerEvent is a message net/http logs about the mock's own handling, such as a panic it caught: a
+// mock bug. [LAW:types-are-the-program] Its event and outcome are fixed, not fields, so no
+// ServerEvent can be written as anything but FAILED.
+type ServerEvent struct{ Message string }
+
+func (e ServerEvent) outcome() string { return string(dispatch.Failed) }
+
+func (e ServerEvent) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Event   string `json:"event"`
+		Message string `json:"message"`
+		Outcome string `json:"outcome"`
+	}{"server", e.Message, e.outcome()})
+}
+
+// serverLog is the writer net/http logs to. log.Logger writes each message, however many lines,
+// in one Write, so each Write is one record. [LAW:no-silent-failure] A record that cannot be written reaches Emit's own crash path.
+type serverLog func(Event)
+
+func (emit serverLog) Write(p []byte) (int, error) {
+	emit(ServerEvent{Message: strings.TrimSuffix(string(p), "\n")})
+	return len(p), nil
+}
 
 // Line is an event as the line it is written as on stderr: its outcome in capitals, then the record as
 // JSON, the form the invocation's own record takes.
