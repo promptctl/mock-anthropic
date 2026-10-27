@@ -3,6 +3,7 @@ package messagesgen_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
+	"github.com/promptctl/mock-anthropic/internal/builtin"
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
 	"github.com/promptctl/mock-anthropic/internal/generator"
@@ -349,17 +351,38 @@ func TestALiteralOnAStatusWithNoBodyHasAnEmptyBody(t *testing.T) {
 }
 
 func TestARequestNoScriptMatchesIsRefusedAndNamesEveryScriptTried(t *testing.T) {
+	// The built-ins are tried after the consumer's scripts, so they are named too.
+	// builtin_test.go pins the list itself; this test is about how a refusal reports whatever it is.
+	builtIns := []string{}
+	for _, b := range builtin.All() {
+		builtIns = append(builtIns, b.Origin)
+	}
 	dir := scripts(t, map[string]string{"a.json": `{"match":{"lastUserContains":["nope"]},"reply":{"kind":"literal","status":200,"body":"x"}}`})
 	s := send(t, context.Background(), []string{dir}, body("hello", false))
-	if s.d.Verdict.Outcome != dispatch.Unmatched || s.d.Verdict.Why != "no script matches: 1 tried" || s.d.Response.Status != 400 {
+	if want := fmt.Sprintf("no script matches: %d tried", 1+len(builtIns)); s.d.Verdict.Outcome != dispatch.Unmatched || s.d.Verdict.Why != want || s.d.Response.Status != 400 {
 		t.Errorf("verdict %v status %d", s.d.Verdict, s.d.Response.Status)
 	}
-	if !reflect.DeepEqual(s.d.Facts["scripts_tried"], []string{filepath.Join(dir, "a.json")}) {
+	if !reflect.DeepEqual(s.d.Facts["scripts_tried"], append([]string{filepath.Join(dir, "a.json")}, builtIns...)) {
 		t.Errorf("facts %v", s.d.Facts)
 	}
 	none := send(t, context.Background(), nil, body("hello", false))
-	if none.d.Verdict.Why != "no script matches: 0 tried" {
+	if want := fmt.Sprintf("no script matches: %d tried", len(builtIns)); none.d.Verdict.Why != want {
 		t.Errorf("no scripts: %v", none.d.Verdict)
+	}
+}
+
+// The built-ins are wired into the endpoint table: a quota probe is answered with no consumer scripts, and
+// a consumer script that matches it answers instead.
+func TestBuiltInsAnswerThroughTheTableAndAConsumerScriptWins(t *testing.T) {
+	probe, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 1, "messages": []any{map[string]any{"role": "user", "content": "quota"}}})
+	s := send(t, context.Background(), nil, string(probe))
+	if s.d.Verdict.Outcome != dispatch.Served || s.d.Facts["script"] != "built-in: quota probe" || !strings.Contains(s.body, `"stop_reason":"max_tokens"`) {
+		t.Errorf("verdict %v facts %v body %q", s.d.Verdict, s.d.Facts, s.body)
+	}
+	dir := scripts(t, reply(`[{"type":"text","text":"mine"}]`, "end_turn"))
+	s = send(t, context.Background(), []string{dir}, string(probe))
+	if s.d.Facts["script"] != filepath.Join(dir, "any.json") || !strings.Contains(s.body, "mine") {
+		t.Errorf("facts %v body %q", s.d.Facts, s.body)
 	}
 }
 
