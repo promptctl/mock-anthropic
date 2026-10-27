@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/command"
@@ -22,31 +23,34 @@ func Over(table *endpoint.Table, stdout io.Writer) command.Command {
 	return command.Command{
 		Kind:  command.Task,
 		Usage: "",
-		Run: func(_ context.Context, args []string, _ func(error), _ func(command.Facts)) (command.Result, error) {
+		Run: func(_ context.Context, args []string, _ func(error), learn func(command.Facts)) (command.Result, error) {
 			if len(args) > 0 {
 				return command.Result{}, &command.UsageError{Why: "unexpected argument: " + args[0]}
 			}
-			var answered, outOfScope, gaps []string
+			var listing strings.Builder
+			answered, outOfScope, gaps := 0, 0, []string{}
 			for _, e := range table.Endpoints() {
 				line := fmt.Sprintf("%s %s%s", e.Method(), e.Host(), e.Path())
 				var label string
 				switch reason, refused := e.OutOfScopeReason(); {
 				case refused:
 					label = fmt.Sprintf("%-14s %s  (%s): %s", "OUT OF SCOPE", line, e.ID(), reason)
-					outOfScope = append(outOfScope, string(e.ID()))
+					outOfScope++
 				case hasGenerator(e):
 					label = fmt.Sprintf("%-14s %s  (%s)", "ANSWERED", line, e.ID())
-					answered = append(answered, string(e.ID()))
+					answered++
 				default:
 					label = fmt.Sprintf("%-14s %s  (%s)", "GAP", line, e.ID())
 					gaps = append(gaps, string(e.ID()))
 				}
-				if _, err := fmt.Fprintln(stdout, label); err != nil {
-					return command.Result{}, fmt.Errorf("writing the listing: %w", err)
-				}
+				fmt.Fprintln(&listing, label)
 			}
 			// [LAW:nothing-unseen] The counts and the gaps themselves are on the record, not only in the listing.
-			facts := command.Facts{"answered": len(answered), "out_of_scope": len(outOfScope), "gaps": append([]string{}, gaps...)}
+			facts := command.Facts{"answered": answered, "out_of_scope": outOfScope, "gaps": gaps}
+			learn(facts)
+			if _, err := io.WriteString(stdout, listing.String()); err != nil {
+				return command.Result{}, fmt.Errorf("writing the listing: %w", err)
+			}
 			if len(gaps) > 0 {
 				return command.Result{Answer: command.No, Facts: facts}, nil
 			}

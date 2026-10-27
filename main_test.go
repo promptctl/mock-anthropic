@@ -90,7 +90,8 @@ func run(t *testing.T, args ...string) finished {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binary(t), args...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	return finish(t, cmd, stdout.String(), &stderr, cmd.Run())
+	err := cmd.Run()
+	return finish(t, cmd, stdout.String(), &stderr, err)
 }
 
 // running is a started serve: the ready line it printed, parsed, and the process.
@@ -380,5 +381,21 @@ func TestServeWrongCommandLine(t *testing.T) {
 				t.Errorf("why %q does not name %q", why, tc.named)
 			}
 		})
+	}
+}
+
+// coverage as a consumer meets it: registered, one stdout line per endpoint, and an exit that is 1
+// exactly when the record names gaps.
+func TestCoverageExitsOneExactlyWhenThereAreGaps(t *testing.T) {
+	f := run(t, "coverage")
+	gaps := f.record["facts"].(map[string]any)["gaps"].([]any)
+	if want := map[bool]int{true: 1, false: 0}[len(gaps) > 0]; f.exit != want {
+		t.Errorf("exit %d with %d gaps, want %d", f.exit, len(gaps), want)
+	}
+	if got := strings.Count(f.stdout, "GAP "); got != len(gaps) {
+		t.Errorf("%d GAP lines on stdout, %d gaps on the record", got, len(gaps))
+	}
+	if !strings.Contains(f.stdout, "ANSWERED") {
+		t.Errorf("stdout lists no answered endpoint: %q", f.stdout)
 	}
 }
