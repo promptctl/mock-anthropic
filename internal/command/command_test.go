@@ -44,7 +44,9 @@ func expect(t *testing.T, record map[string]any, want map[string]any) {
 }
 
 func task(run func(ctx context.Context, args []string) (Result, error)) Commands {
-	return Commands{"stand_in": {Kind: Task, Run: func(ctx context.Context, args []string, _ func(error)) (Result, error) { return run(ctx, args) }}}
+	return Commands{"stand_in": {Kind: Task, Run: func(ctx context.Context, args []string, _ func(error), _ func(Facts)) (Result, error) {
+		return run(ctx, args)
+	}}}
 }
 
 func TestWrongCommandLine(t *testing.T) {
@@ -171,7 +173,7 @@ func TestSignalEndsATaskAtOnce(t *testing.T) {
 
 func TestServiceStopsOnASignal(t *testing.T) {
 	signals := make(chan os.Signal, 1)
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error)) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error), _ func(Facts)) (Result, error) {
 		signals <- syscall.SIGTERM
 		<-ctx.Done()
 		return Result{Answer: OK, Facts: Facts{"stopped": "cleanly"}}, nil
@@ -185,7 +187,7 @@ func TestServiceStopsOnASignal(t *testing.T) {
 
 func TestSecondSignalEndsAStoppingService(t *testing.T) {
 	signals := make(chan os.Signal, 2)
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error)) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error), _ func(Facts)) (Result, error) {
 		signals <- syscall.SIGINT
 		<-ctx.Done()
 		signals <- syscall.SIGINT
@@ -198,8 +200,22 @@ func TestSecondSignalEndsAStoppingService(t *testing.T) {
 	expect(t, record, map[string]any{"outcome": "failed", "ended_by": "SIGINT", "why": "SIGINT before the command finished\nSIGINT while the command was ending"})
 }
 
+func TestSecondSignalKeepsWhatTheServiceLearned(t *testing.T) {
+	signals := make(chan os.Signal, 2)
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, _ func(error), learn func(Facts)) (Result, error) {
+		learn(Facts{"port": 7, "ca": "a"})
+		learn(Facts{"ca": "b"})
+		signals <- syscall.SIGINT
+		<-ctx.Done()
+		signals <- syscall.SIGINT
+		select {}
+	}}}
+	_, record, _ := run(t, service, []string{"stand_in"}, signals)
+	expect(t, record, map[string]any{"outcome": "failed", "facts": map[string]any{"port": 7, "ca": "b"}})
+}
+
 func TestCommandWithNoKindFails(t *testing.T) {
-	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string, func(error)) (Result, error) {
+	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string, func(error), func(Facts)) (Result, error) {
 		return Result{Answer: OK}, nil
 	}}}, []string{"stand_in"}, nil)
 	if exit != 1 {
@@ -209,7 +225,7 @@ func TestCommandWithNoKindFails(t *testing.T) {
 }
 
 func TestReportedCrashStopsAServiceAndKeepsItsFacts(t *testing.T) {
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error), _ func(Facts)) (Result, error) {
 		go crash(errors.New("a sink broke"))
 		<-ctx.Done()
 		return Result{Answer: OK, Facts: Facts{"port": 1}}, nil
@@ -224,7 +240,7 @@ func TestReportedCrashStopsAServiceAndKeepsItsFacts(t *testing.T) {
 // A sink that keeps failing reports again from every record its own stop writes; none of those cuts
 // the stop short, and the record tells the crash once.
 func TestCrashWhileACrashedServiceStopsKeepsItsFacts(t *testing.T) {
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error), _ func(Facts)) (Result, error) {
 		crash(errors.New("a sink broke"))
 		<-ctx.Done()
 		crash(errors.New("a sink broke"))
@@ -238,7 +254,7 @@ func TestCrashWhileACrashedServiceStopsKeepsItsFacts(t *testing.T) {
 }
 
 func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
-	commands := Commands{"stand_in": {Kind: Task, Run: func(_ context.Context, _ []string, crash func(error)) (Result, error) {
+	commands := Commands{"stand_in": {Kind: Task, Run: func(_ context.Context, _ []string, crash func(error), _ func(Facts)) (Result, error) {
 		crash(errors.New("a sink broke"))
 		select {}
 	}}}
@@ -253,7 +269,7 @@ func TestReportedCrashEndsATaskAtOnce(t *testing.T) {
 // only a second one ends the invocation at once.
 func TestSecondSignalWhileACrashedServiceStopsEndsItAtOnce(t *testing.T) {
 	signals := make(chan os.Signal, 2)
-	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error)) (Result, error) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(ctx context.Context, _ []string, crash func(error), _ func(Facts)) (Result, error) {
 		crash(errors.New("a sink broke"))
 		<-ctx.Done()
 		signals <- syscall.SIGTERM

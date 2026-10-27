@@ -279,7 +279,15 @@ func TestServeSecondSignalWhileStoppingFails(t *testing.T) {
 	if result.exit != 1 {
 		t.Errorf("exit %d, want 1", result.exit)
 	}
-	expect(t, result.record, map[string]any{"outcome": "failed", "facts": map[string]any{}})
+	// The stop was cut short, but what serve learned before it is on the record.
+	expect(t, result.record, map[string]any{"outcome": "failed"})
+	facts, _ := result.record["facts"].(map[string]any)
+	expect(t, facts, map[string]any{"port": ready.Port, "account_file": nil, "scenarios": []string{}})
+	for _, key := range []string{"ca", "certificates"} {
+		if facts[key] == nil {
+			t.Errorf("facts %v lack %s", facts, key)
+		}
+	}
 	// Both signals are pending before the dispatcher reads either; which it reads first is the runtime's.
 	first, _ := result.record["ended_by"].(string)
 	second := map[string]string{"SIGTERM": "SIGINT", "SIGINT": "SIGTERM"}[first]
