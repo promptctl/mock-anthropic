@@ -27,7 +27,10 @@ type Request struct {
 type Facts map[string]any
 
 // Response is what reaches the client. Body may stream: it is copied as it is read, and a generator
-// that produces it stops when the request's context ends.
+// that produces it stops when the request's context ends. A Body that is also an io.Closer is closed
+// exactly once on every path out of the request, whether the body was read to its end, abandoned, or
+// never read, and before the request's Facts are read for its record; the Facts map belongs to the
+// Handler until Close returns, so Close may add to it. An error from Close fails the request.
 type Response struct {
 	Status int
 	Header http.Header

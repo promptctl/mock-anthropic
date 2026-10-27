@@ -260,7 +260,7 @@ func parseFile(text []byte) (file, error) {
 	if !ok {
 		return file{}, errors.New("reply: required")
 	}
-	if f.reply, err = parseReply(raw); err != nil {
+	if f.reply, err = ParseReply(raw); err != nil {
 		return file{}, fmt.Errorf("reply: %w", err)
 	}
 	return f, nil
@@ -307,7 +307,8 @@ func needles(raw json.RawMessage) ([]string, error) {
 	return out, nil
 }
 
-func parseReply(raw json.RawMessage) (Reply, error) {
+// ParseReply is the one reader of a reply's JSON form, shared by a script file and a recording.
+func ParseReply(raw json.RawMessage) (Reply, error) {
 	var peek map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &peek); err != nil {
 		return nil, errors.New("expected an object")

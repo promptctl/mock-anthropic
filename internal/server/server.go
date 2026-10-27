@@ -692,6 +692,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		d = dispatch.Refuse(req, plainOnly, generator.Facts{})
 	default:
 		d = s.handle(r.Context(), resolution, miss, req)
+		// [LAW:no-ambient-temporal-coupling] From here every path out records the request, and the record
+		// closes the handler's body first: the one signal that the body is over, however it ended.
+		rec.closer, _ = d.Response.Body.(io.Closer)
 	}
 	if r.Context().Err() != nil {
 		rec.record(nil, d.Facts, Aborted, endedEarly(sc.client.endedBy(), notReady))
@@ -777,9 +780,19 @@ type request struct {
 	emit    func(Event)
 	event   RequestEvent
 	started time.Time
+	// closer is the handler's response body when it is also an io.Closer. record closes it once, before
+	// it reads the facts, so what the handler learns as its body ends (a recording saved or abandoned)
+	// is on this request's record. A close that fails is the mock's own failure.
+	closer io.Closer
 }
 
 func (q *request) record(status *int, facts generator.Facts, outcome RequestOutcome, why string) {
+	if c := q.closer; c != nil {
+		q.closer = nil
+		if err := c.Close(); err != nil {
+			outcome, why = RequestFailed, fmt.Sprintf("closing the response body: %v", err)
+		}
+	}
 	q.event.Status, q.event.Outcome, q.event.Why = status, outcome, why
 	q.event.DurationMS = time.Since(q.started).Milliseconds()
 	if facts != nil {
