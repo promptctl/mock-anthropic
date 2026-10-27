@@ -295,7 +295,7 @@ func TestAMalformedScriptFailsNamingItsPath(t *testing.T) {
 		"tool input that is not an object": {m{"reply": tool("ls", "Bash")}, "reply: content[0]: input"},
 		"a tool call with no name":         {m{"reply": tool(m{}, "")}, "reply: content[0]: name"},
 		"a tool name the API refuses":      {m{"reply": tool(m{}, "my tool")}, "reply: content[0]: name"},
-		"a framing header":                 {m{"reply": lit(m{"headers": m{"Content-Length": "5"}})}, "the mock frames the response itself"},
+		"a tool name of 65 characters":    {m{"reply": tool(m{}, strings.Repeat("a", 65))}, "reply: content[0]: name"},
 		"the first of two bad keys":        {m{"reply": msg(m{"b": 1, "a": 1})}, `Unrecognized key: "a"`},
 	}
 	for what, c := range bad {
@@ -388,5 +388,13 @@ func TestAHeaderNamedThreeTimesIsListedOnce(t *testing.T) {
 	_, err := InOrder([]string{d}, nil)
 	if err == nil || !strings.HasSuffix(err.Error(), "names a field twice: x-a") {
 		t.Errorf("%v", err)
+	}
+}
+
+func TestAToolNameOf64CharactersLoads(t *testing.T) {
+	d := t.TempDir()
+	write(t, d, "ok.json", m{"reply": m{"kind": "message", "stop_reason": "tool_use", "content": []m{{"type": "tool_use", "name": strings.Repeat("a", 64), "input": m{}}}}})
+	if _, err := InOrder([]string{d}, nil); err != nil {
+		t.Error(err)
 	}
 }

@@ -75,3 +75,10 @@ func TestParseRequestDefaultsAndRefusals(t *testing.T) {
 		}
 	}
 }
+
+func TestAToolResultWithNullContentHasNoText(t *testing.T) {
+	r, err := ParseRequest(body(`[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":null}]}]`, ``))
+	if err != nil || len(r.LastUserTexts) != 0 {
+		t.Errorf("%q, %v", r.LastUserTexts, err)
+	}
+}

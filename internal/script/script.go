@@ -328,8 +328,8 @@ func parseReply(raw json.RawMessage) (Reply, error) {
 	return nil, fmt.Errorf(`kind: expected "message" or "literal", got %q`, kind)
 }
 
-// An arbitrary ceiling (about 24 days per event), far inside what time.Duration holds, so a mistyped
-// delay is an error at load instead of a response that never ends.
+// A ceiling on one event's delay (about 24 days): a mistyped delay is an error at load, and the
+// millisecond count stays far inside what time.Duration holds.
 const maxDelayMs = 1<<31 - 1
 
 func parseMessage(raw json.RawMessage) (Reply, error) {
@@ -486,9 +486,6 @@ func parseHeaders(raw json.RawMessage, into http.Header) error {
 			return fmt.Errorf("%s: invalid value %q", name, value)
 		}
 		lower := strings.ToLower(name)
-		if framing[lower] {
-			return fmt.Errorf("%s: the mock frames the response itself", name)
-		}
 		if seen[lower] && !slices.Contains(repeated, lower) {
 			repeated = append(repeated, lower)
 		}
@@ -500,10 +497,6 @@ func parseHeaders(raw json.RawMessage, into http.Header) error {
 	}
 	return nil
 }
-
-// Headers that describe how the body is carried: the server sets them from the body it writes, so a
-// script's own would contradict it.
-var framing = map[string]bool{"content-length": true, "transfer-encoding": true, "connection": true, "trailer": true, "upgrade": true}
 
 // A field name is a token (RFC 9110 5.6.2).
 func validName(name string) bool {
@@ -537,15 +530,15 @@ func object(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage,
 	if raw == nil || json.Unmarshal(raw, &o) != nil || o == nil {
 		return nil, errors.New("expected an object")
 	}
-	keys := make([]string, 0, len(o))
+	// The first by name, so the error is the same on every run.
+	unrecognized, found := "", false
 	for key := range o {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		if len(allowed) > 0 && !slices.Contains(allowed, key) {
-			return nil, fmt.Errorf("Unrecognized key: %q", key)
+		if len(allowed) > 0 && !slices.Contains(allowed, key) && (!found || key < unrecognized) {
+			unrecognized, found = key, true
 		}
+	}
+	if found {
+		return nil, fmt.Errorf("Unrecognized key: %q", unrecognized)
 	}
 	return o, nil
 }

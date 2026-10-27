@@ -133,7 +133,7 @@ func contentTexts(raw json.RawMessage) []string {
 		case textType:
 			texts = append(texts, b.Text)
 		case toolResultType:
-			if b.Content != nil {
+			if !absent(b.Content) {
 				texts = append(texts, contentTexts(b.Content)...)
 			}
 		}
