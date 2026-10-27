@@ -36,6 +36,111 @@ func ParseCountTokens(raw []byte) (CountTokensRequest, error) {
 	return CountTokensRequest{InputTokens: inputTokens(body.System, body.Messages, body.Tools)}, nil
 }
 
+// Request is a `POST /v1/messages` body that parsed. [LAW:parse-dont-validate] Only ParseRequest makes
+// one. Raw is the body as sent, for matching anywhere in it. LastUserTexts are the texts of the last
+// `user` message, the current turn: a `text` block's text and a `tool_result` block's text content, and
+// nothing from any other block, so ids, `type` values and image data are never matchable. A
+// `system`-role message contributes no text to any field, so it is reached only through Raw.
+// SystemTexts are the system prompt's blocks, each one text.
+type Request struct {
+	Raw           string
+	Model         string
+	MaxTokens     int
+	Stream        bool
+	SystemTexts   []string
+	LastUserTexts []string
+	InputTokens   int
+}
+
+// ParseRequest reads a Messages request: the base, then `max_tokens` (a positive integer) and `stream`
+// (false when absent), and a last user message for a script to be matched against. The error is the
+// reason the body is not one, for the generator to decline with.
+func ParseRequest(raw []byte) (Request, error) {
+	var body struct {
+		Model     json.RawMessage `json:"model"`
+		System    json.RawMessage `json:"system"`
+		Messages  json.RawMessage `json:"messages"`
+		Tools     json.RawMessage `json:"tools"`
+		MaxTokens json.RawMessage `json:"max_tokens"`
+		Stream    json.RawMessage `json:"stream"`
+	}
+	const notOne = "body is not a Messages request: %w"
+	if err := decodeObject(raw, &body); err != nil {
+		return Request{}, fmt.Errorf(notOne, err)
+	}
+	if err := checkBase(body.Model, body.System, body.Messages); err != nil {
+		return Request{}, fmt.Errorf(notOne, err)
+	}
+	r := Request{Raw: string(raw), InputTokens: inputTokens(body.System, body.Messages, body.Tools)}
+	// A number with a fraction, or a string, is not an integer: decoding into int refuses both.
+	if err := json.Unmarshal(body.MaxTokens, &r.MaxTokens); err != nil || r.MaxTokens < 1 {
+		return Request{}, fmt.Errorf(notOne, errors.New("max_tokens: expected a positive integer"))
+	}
+	if body.Stream != nil {
+		if err := json.Unmarshal(body.Stream, &r.Stream); err != nil || bytes.Equal(body.Stream, []byte("null")) {
+			return Request{}, fmt.Errorf(notOne, errors.New("stream: expected a boolean"))
+		}
+	}
+	// checkBase passed, so each decode below succeeds; what it holds is only read here.
+	json.Unmarshal(body.Model, &r.Model)
+	r.SystemTexts = systemTexts(body.System)
+	var list []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	json.Unmarshal(body.Messages, &list)
+	found := false
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i].Role == "user" {
+			r.LastUserTexts, found = contentTexts(list[i].Content), true
+			break
+		}
+	}
+	if !found {
+		return Request{}, fmt.Errorf(notOne, errors.New("messages: has no user message"))
+	}
+	return r, nil
+}
+
+// absent is an optional field left out or sent as null, which the API reads alike.
+func absent(raw json.RawMessage) bool { return raw == nil || bytes.Equal(raw, []byte("null")) }
+
+// systemTexts is a checked system prompt as texts: a string is one, and a list of text blocks is one each.
+func systemTexts(raw json.RawMessage) []string {
+	if absent(raw) {
+		return []string{}
+	}
+	return contentTexts(raw)
+}
+
+// contentTexts is checked content as the texts a script can match in it: a string is one text, and a
+// list of blocks is each `text` block's text and each `tool_result` block's content, in order.
+// [LAW:one-type-per-behavior] A message's content and a tool result's content are one shape.
+func contentTexts(raw json.RawMessage) []string {
+	texts := []string{}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return append(texts, text)
+	}
+	var blocks []struct {
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+	}
+	json.Unmarshal(raw, &blocks)
+	for _, b := range blocks {
+		switch b.Type {
+		case textType:
+			texts = append(texts, b.Text)
+		case toolResultType:
+			if !absent(b.Content) {
+				texts = append(texts, contentTexts(b.Content)...)
+			}
+		}
+	}
+	return texts
+}
+
 // Plausible, not counted: about four characters to a token, as English text runs.
 func tokens(text string) int {
 	units := 0
@@ -89,7 +194,7 @@ func checkBase(model, system, messages json.RawMessage) error {
 	if err := json.Unmarshal(model, &name); err != nil || name == "" {
 		return errors.New("model: expected a non-empty string")
 	}
-	if system != nil {
+	if !absent(system) {
 		if err := checkSystem(system); err != nil {
 			return fmt.Errorf("system: %w", err)
 		}
