@@ -3,6 +3,7 @@ package endpoint
 import (
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/accountgen"
+	"github.com/promptctl/mock-anthropic/internal/servicegen"
 )
 
 // API is the host a request sent straight to the mock's port is addressed to (PROJECT.md "How a
@@ -40,35 +41,36 @@ const (
 // named field of its row.
 func Rows(a account.Account) []Row {
 	g := accountgen.New(a)
+	s := servicegen.New()
 	return []Row{
 		InScope("messages", API, "POST", "/v1/messages", nil),
-		InScope("messages-count-tokens", API, "POST", "/v1/messages/count_tokens", nil),
+		InScope("messages-count-tokens", API, "POST", "/v1/messages/count_tokens", s.CountTokens),
 		InScope("oauth-profile", API, "GET", "/api/oauth/profile", g.Profile),
 		InScope("oauth-roles", API, "GET", "/api/oauth/claude_cli/roles", g.Roles),
 		InScope("oauth-usage", API, "GET", "/api/oauth/usage", g.Usage),
 		InScope("oauth-validate", API, "POST", "/api/oauth/validate", g.Validate),
 		InScope("oauth-token", hostPlatform, "POST", "/v1/oauth/token", g.Token),
 		InScope("claude-cli-bootstrap", API, "GET", "/api/claude_cli/bootstrap", g.Bootstrap),
-		InScope("feature-flag-eval", API, "POST", "/api/eval/{client_key}", nil),
-		InScope("event-logging-batch", API, "POST", "/api/event_logging/batch", nil),
-		InScope("event-logging-v2-batch", API, "POST", "/api/event_logging/v2/batch", nil),
-		InScope("metrics-enabled", API, "GET", "/api/claude_code/organizations/metrics_enabled", nil),
-		InScope("remote-managed-settings", API, "GET", "/api/claude_code/settings", nil),
-		InScope("policy-limits", API, "GET", "/api/claude_code/policy_limits", nil),
-		InScope("penguin-mode", API, "GET", "/api/claude_code_penguin_mode", nil),
-		InScope("grove-config", API, "GET", "/api/claude_code_grove", nil),
+		InScope("feature-flag-eval", API, "POST", "/api/eval/{client_key}", s.FeatureFlags),
+		InScope("event-logging-batch", API, "POST", "/api/event_logging/batch", s.EventLoggingBatch),
+		InScope("event-logging-v2-batch", API, "POST", "/api/event_logging/v2/batch", s.EventLoggingV2Batch),
+		InScope("metrics-enabled", API, "GET", "/api/claude_code/organizations/metrics_enabled", s.MetricsEnabled),
+		InScope("remote-managed-settings", API, "GET", "/api/claude_code/settings", s.RemoteManagedSettings),
+		InScope("policy-limits", API, "GET", "/api/claude_code/policy_limits", s.PolicyLimits),
+		InScope("penguin-mode", API, "GET", "/api/claude_code_penguin_mode", s.PenguinMode),
+		InScope("grove-config", API, "GET", "/api/claude_code_grove", s.GroveConfig),
 		InScope("referral-eligibility", API, "GET", "/api/oauth/organizations/{org}/referral/eligibility", g.ReferralEligibility),
 		InScope("overage-credit-grant", API, "GET", "/api/oauth/organizations/{org}/overage_credit_grant", g.OverageCreditGrant),
-		InScope("mcp-registry", API, "GET", "/mcp-registry/v0/servers", nil),
-		InScope("mcp-servers", API, "GET", "/v1/mcp_servers", nil),
-		InScope("marketplace-version", hostDownloads, "GET", "/claude-code-releases/plugins/claude-plugins-official/latest", nil),
-		InScope("changelog", hostGitHubRaw, "GET", "/anthropics/claude-code/refs/heads/main/CHANGELOG.md", nil),
+		InScope("mcp-registry", API, "GET", "/mcp-registry/v0/servers", s.MCPRegistry),
+		InScope("mcp-servers", API, "GET", "/v1/mcp_servers", s.MCPServers),
+		InScope("marketplace-version", hostDownloads, "GET", "/claude-code-releases/plugins/claude-plugins-official/latest", s.MarketplaceVersion),
+		InScope("changelog", hostGitHubRaw, "GET", "/anthropics/claude-code/refs/heads/main/CHANGELOG.md", s.Changelog),
 		InScope("organization-skills", API, "GET", "/api/oauth/organizations/{org}/skills/list-skills", g.Skills),
 		InScope("model-selector", API, "GET", "/api/organizations/{org}/model_selector/cc", g.ModelSelector),
 		InScope("organization-marketplaces", API, "GET", "/api/oauth/organizations/{org}/marketplaces", g.Marketplaces),
 		InScope("organization-plugins", API, "GET", "/api/oauth/organizations/{org}/plugins/list-plugins", g.Plugins),
-		InScope("datadog-logs", hostDatadogLogs, "POST", "/api/v2/logs", nil),
-		InScope("datadog-error-tracking", hostDatadogBrowser, "POST", "/api/v2/logs", nil),
+		InScope("datadog-logs", hostDatadogLogs, "POST", "/api/v2/logs", s.DatadogLogs),
+		InScope("datadog-error-tracking", hostDatadogBrowser, "POST", "/api/v2/logs", s.DatadogErrorTracking),
 		OutOfScope("claude-cli-profile", API, "GET", "/api/claude_cli_profile", reasonAPIKeyLogin),
 		OutOfScope("oauth-authorize", hostPlatform, "GET", "/oauth/authorize", reasonBrowserLogin),
 		OutOfScope("oauth-create-api-key", API, "POST", "/api/oauth/claude_cli/create_api_key", reasonBrowserLogin),
