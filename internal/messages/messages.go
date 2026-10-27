@@ -50,12 +50,38 @@ type Request struct {
 	SystemTexts   []string
 	LastUserTexts []string
 	InputTokens   int
+	// Canonical is what the body canonicalizes to (a recording's key, or why there is none), computed
+	// from this same body by the function ParseRequest was given.
+	Canonical Canonical
 }
+
+// Canonical is a request body's canonical form, as the function given to ParseRequest made it. Facts is
+// what a record of the request says about it. [LAW:nothing-unseen]
+type Canonical interface{ Facts() map[string]any }
+
+// NotAsked is the canonical form of a caller that never matches against recordings.
+type NotAsked struct{}
+
+func (NotAsked) Facts() map[string]any { return map[string]any{"key": "not asked"} }
+
+// Unkeyed is the canonicalize function of a caller that never matches against recordings.
+func Unkeyed([]byte) (Canonical, error) { return NotAsked{}, nil }
+
+// CanonicalizeError is a body that is a Messages request but could not be canonicalized: the mock
+// failing, not the client's body, so it is never declined as one.
+type CanonicalizeError struct{ Err error }
+
+func (e *CanonicalizeError) Error() string { return "canonicalizing the request: " + e.Err.Error() }
+func (e *CanonicalizeError) Unwrap() error { return e.Err }
 
 // ParseRequest reads a Messages request: the base, then `max_tokens` (a positive integer) and `stream`
 // (false when absent), and a last user message for a script to be matched against. The error is the
-// reason the body is not one, for the generator to decline with.
-func ParseRequest(raw []byte) (Request, error) {
+// reason the body is not one, for the generator to decline with. Once the body is known to be one,
+// canonicalize makes its canonical form from that same body; its failure is a *CanonicalizeError.
+func ParseRequest(raw []byte, canonicalize func([]byte) (Canonical, error)) (Request, error) {
+	if canonicalize == nil {
+		return Request{}, errors.New("ParseRequest needs a canonicalize function; messages.Unkeyed is the one for a caller that matches no recording")
+	}
 	var body struct {
 		Model     json.RawMessage `json:"model"`
 		System    json.RawMessage `json:"system"`
@@ -84,22 +110,33 @@ func ParseRequest(raw []byte) (Request, error) {
 	// checkBase passed, so each decode below succeeds; what it holds is only read here.
 	json.Unmarshal(body.Model, &r.Model)
 	r.SystemTexts = systemTexts(body.System)
+	content, found := lastUserContent(body.Messages)
+	if !found {
+		return Request{}, fmt.Errorf(notOne, errors.New("messages: has no user message"))
+	}
+	r.LastUserTexts = contentTexts(content)
+	c, err := canonicalize(raw)
+	if err != nil {
+		return Request{}, &CanonicalizeError{err}
+	}
+	r.Canonical = c
+	return r, nil
+}
+
+// lastUserContent is the content of the last `user` message of a checked `messages` list: the current
+// turn. [LAW:one-source-of-truth] ParseRequest and ReadKey both find it here.
+func lastUserContent(messages json.RawMessage) (json.RawMessage, bool) {
 	var list []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
-	json.Unmarshal(body.Messages, &list)
-	found := false
+	json.Unmarshal(messages, &list)
 	for i := len(list) - 1; i >= 0; i-- {
 		if list[i].Role == "user" {
-			r.LastUserTexts, found = contentTexts(list[i].Content), true
-			break
+			return list[i].Content, true
 		}
 	}
-	if !found {
-		return Request{}, fmt.Errorf(notOne, errors.New("messages: has no user message"))
-	}
-	return r, nil
+	return nil, false
 }
 
 // absent is an optional field left out or sent as null, which the API reads alike.

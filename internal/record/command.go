@@ -35,7 +35,7 @@ func Command(stdout io.Writer, stderr *command.Log, upstream http.RoundTripper) 
 			rc := &Recorder{Upstream: upstream, Writer: w, Account: c.account, Totals: totals}
 			result, err := serve.Launch(ctx, stdout, stderr, crash, learn, server.Options{
 				Port:   c.port,
-				Table:  endpoint.For(c.account, nil),
+				Table:  endpoint.For(c.account, nil, nil),
 				Handle: rc.Handle,
 			}, command.Facts{"dir": c.dir, "account_file": c.accountFile})
 			if err != nil {

@@ -25,7 +25,7 @@ func request(t *testing.T, system []string, user string, maxTokens int) messages
 		"model": "claude-sonnet-5-5", "max_tokens": maxTokens, "system": blocks,
 		"messages": []block{{"role": "user", "content": user}},
 	})
-	r, err := messages.ParseRequest(raw)
+	r, err := messages.ParseRequest(raw, messages.Unkeyed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func request(t *testing.T, system []string, user string, maxTokens int) messages
 
 func answer(t *testing.T, r messages.Request) script.Selection {
 	t.Helper()
-	scripts, err := script.InOrder(nil, builtin.All())
+	scripts, err := script.InOrder(nil, nil, builtin.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestConsumerScriptTakesPrecedence(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "quota.json"), []byte(file), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	scripts, err := script.InOrder([]string{dir}, builtin.All())
+	scripts, err := script.InOrder([]string{dir}, nil, builtin.All())
 	if err != nil {
 		t.Fatal(err)
 	}

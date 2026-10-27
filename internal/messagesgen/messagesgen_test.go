@@ -50,7 +50,7 @@ func body(text string, stream bool) string {
 func send(t *testing.T, ctx context.Context, dirs []string, request string) sent {
 	t.Helper()
 	u, _ := url.Parse("https://api.anthropic.com/v1/messages?beta=true")
-	resolution, miss := endpoint.For(account.Default(), dirs).Resolve("POST", u.Host, u.EscapedPath())
+	resolution, miss := endpoint.For(account.Default(), dirs, nil).Resolve("POST", u.Host, u.EscapedPath())
 	d := dispatch.Dispatch(ctx, resolution, miss, generator.Request{Method: "POST", URL: u, Body: []byte(request)})
 	raw, err := io.ReadAll(d.Response.Body)
 	if err != nil {
@@ -320,7 +320,7 @@ func TestTheRecordedFactsNameTheScriptAndWhatWasSent(t *testing.T) {
 	dir := scripts(t, reply(`[{"type":"text","text":"hi"}]`, "end_turn"))
 	m := decode(t, send(t, context.Background(), []string{dir}, body("hello", false)).body)
 	s := send(t, context.Background(), []string{dir}, body("hello", false))
-	want := generator.Facts{"script": filepath.Join(dir, "any.json"), "reply": generator.Facts{"kind": "json", "id": m["id"], "stop_reason": "end_turn"}}
+	want := generator.Facts{"key": "none: the request carries no diagnostics.previous_message_id", "script": filepath.Join(dir, "any.json"), "reply": generator.Facts{"kind": "json", "id": m["id"], "stop_reason": "end_turn"}}
 	if !reflect.DeepEqual(s.d.Facts, want) {
 		t.Errorf("facts %v, want %v", s.d.Facts, want)
 	}
@@ -416,7 +416,7 @@ func TestAStreamWaitsBetweenEventsAndStopsWhenTheRequestEnds(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	u, _ := url.Parse("https://api.anthropic.com/v1/messages")
-	resolution, miss := endpoint.For(account.Default(), []string{dir}).Resolve("POST", u.Host, u.Path)
+	resolution, miss := endpoint.For(account.Default(), []string{dir}, nil).Resolve("POST", u.Host, u.Path)
 	d := dispatch.Dispatch(ctx, resolution, miss, generator.Request{Method: "POST", URL: u, Body: []byte(body("hello", true))})
 	buf := make([]byte, 1<<16)
 	if n, err := d.Response.Body.Read(buf); n == 0 || err != nil {
@@ -441,7 +441,7 @@ func TestIdenticalRequestsGetDistinctIDsThatAReplayReproduces(t *testing.T) {
 	dirs := []string{scripts(t, reply(`[{"type":"text","text":"hi"},{"type":"tool_use","name":"x","input":{"a":1}}]`, "tool_use"))}
 	ids := func() []string {
 		u, _ := url.Parse("https://api.anthropic.com/v1/messages")
-		table := endpoint.For(account.Default(), dirs)
+		table := endpoint.For(account.Default(), dirs, nil)
 		var out []string
 		for range 2 {
 			resolution, miss := table.Resolve("POST", u.Host, u.Path)

@@ -67,7 +67,7 @@ func (p planted) stream() []byte {
 		return `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(b) + `}}`
 	}
 	return sse(
-		`{"type":"message_start","message":{}}`,
+		`{"type":"message_start","message":{"id":"msg_01"}}`,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 		delta("you are "+p.email[:half]), delta(p.email[half:]+" and "+p.toolUUID[:20]), delta(p.toolUUID[20:]),
 		`{"type":"content_block_stop","index":0}`,
@@ -78,11 +78,11 @@ func (p planted) stream() []byte {
 
 func scrubPlanted(t *testing.T, p planted, userID string) (Exchange, Counts) {
 	t.Helper()
-	reply, err := Assemble(stream, p.stream())
+	reply, _, err := Assemble(stream, p.stream())
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, counts, err := Scrub(Exchange{Request: json.RawMessage(p.request(userID)), Reply: reply}, []string{p.token, "Bearer " + p.token}, account.Default())
+	s, counts, err := Scrub(Exchange{Request: json.RawMessage(p.request(userID)), Reply: reply, MessageID: oneID}, []string{p.token, "Bearer " + p.token}, account.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestScrubReadsJSONEscapes(t *testing.T) {
 	p := plant()
 	escaped := strings.Replace(p.email, "@", `@`, 1)
 	req := `{"model":"m","messages":[{"role":"user","content":"` + escaped + `"}]}`
-	s, _, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+	s, _, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply), MessageID: oneID}, nil, account.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestScrubMapsOneUUIDToOneStandInWhateverSurroundsIt(t *testing.T) {
 	p := plant()
 	scrubbedContent := func(surround string) string {
 		req := `{"model":"m","messages":[{"role":"user","content":"` + surround + p.toolUUID + `"}]}`
-		s, _, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+		s, _, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply), MessageID: oneID}, nil, account.Default())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +167,7 @@ func TestScrubMapsOneUUIDToOneStandInWhateverSurroundsIt(t *testing.T) {
 
 func TestScrubRefusesWhatItCannotMakeClean(t *testing.T) {
 	// A secret that the mock's own token contains: replacing it puts it back.
-	_, _, err := Scrub(Exchange{Request: json.RawMessage(`{"messages":[{"role":"user","content":"a-secret-` + oauth.AccessToken[5:] + `"}]}`), Reply: json.RawMessage(oneReply)},
+	_, _, err := Scrub(Exchange{Request: json.RawMessage(`{"messages":[{"role":"user","content":"a-secret-` + oauth.AccessToken[5:] + `"}]}`), Reply: json.RawMessage(oneReply), MessageID: oneID},
 		[]string{oauth.AccessToken[5:]}, account.Default())
 	if err == nil || !strings.Contains(err.Error(), "token at .request") {
 		t.Errorf("a secret the replacement contains: %v", err)
@@ -176,7 +176,7 @@ func TestScrubRefusesWhatItCannotMakeClean(t *testing.T) {
 		t.Errorf("the refusal copies the value: %v", err)
 	}
 	p := plant()
-	_, _, err = Scrub(Exchange{Request: json.RawMessage(`{"messages":[{"role":"user","content":"x"}],"` + p.email + `":1,"` + p.other + `":2}`), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+	_, _, err = Scrub(Exchange{Request: json.RawMessage(`{"messages":[{"role":"user","content":"x"}],"` + p.email + `":1,"` + p.other + `":2}`), Reply: json.RawMessage(oneReply), MessageID: oneID}, nil, account.Default())
 	if err == nil || !strings.Contains(err.Error(), "same key") {
 		t.Errorf("two keys that scrub alike: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestScrubRefusesWhatItCannotMakeClean(t *testing.T) {
 
 func TestScrubLeavesPackageVersionsAlone(t *testing.T) {
 	req := `{"model":"m","messages":[{"role":"user","content":"npm i lodash@4.17.21 and mail me@example.com"}]}`
-	s, counts, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+	s, counts, err := Scrub(Exchange{Request: json.RawMessage(req), Reply: json.RawMessage(oneReply), MessageID: oneID}, nil, account.Default())
 	if err != nil {
 		t.Fatal(err)
 	}

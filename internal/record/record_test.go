@@ -100,7 +100,7 @@ func start(t *testing.T) *rig {
 	totals := &Totals{}
 	rc := &Recorder{Upstream: up.transport(), Writer: w, Account: account.Default(), Totals: totals}
 	events := make(chan server.RequestEvent, 64)
-	s, err := server.Start(server.Options{Table: endpoint.For(account.Default(), nil), Handle: rc.Handle, CertsDir: certsDir,
+	s, err := server.Start(server.Options{Table: endpoint.For(account.Default(), nil, nil), Handle: rc.Handle, CertsDir: certsDir,
 		Emit: func(e server.Event) {
 			if r, ok := e.(server.RequestEvent); ok {
 				events <- r
@@ -198,7 +198,7 @@ func TestAnAPIKeyLoginIsScrubbedToo(t *testing.T) {
 	key := "sk-ant-" + "api03-" + strings.Repeat("Zq9", 8)
 	r.up.hook = func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"content":[{"type":"text","text":"your key is `+key+`"}],"stop_reason":"end_turn"}`)
+		io.WriteString(w, `{"id":"msg_2","content":[{"type":"text","text":"your key is `+key+`"}],"stop_reason":"end_turn"}`)
 	}
 	r.post(t, "/v1/messages", `{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, http.Header{"X-Api-Key": {key}})
 	files := r.saved(t)

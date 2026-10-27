@@ -37,7 +37,7 @@ func TestParseRequestReadsTheTextsAScriptMatches(t *testing.T) {
 		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":[{"type":"text","text":"12 pass"},{"type":"image"}]},{"type":"text","text":"ok"},{"type":"image","source":"x"}]},
 		{"role":"system","content":"hook context"}
-	]`, `,"system":[{"type":"text","text":"You are"},{"type":"text","text":"Claude"}],"stream":true`))
+	]`, `,"system":[{"type":"text","text":"You are"},{"type":"text","text":"Claude"}],"stream":true`), Unkeyed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +53,10 @@ func TestParseRequestReadsTheTextsAScriptMatches(t *testing.T) {
 }
 
 func TestParseRequestDefaultsAndRefusals(t *testing.T) {
-	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, `,"system":null`)); err != nil || len(r.SystemTexts) != 0 {
+	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, `,"system":null`), Unkeyed); err != nil || len(r.SystemTexts) != 0 {
 		t.Errorf("a null system is a missing one: %+v, %v", r, err)
 	}
-	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, ``)); err != nil || r.Stream || len(r.SystemTexts) != 0 {
+	if r, err := ParseRequest(body(`[{"role":"user","content":"hi"}]`, ``), Unkeyed); err != nil || r.Stream || len(r.SystemTexts) != 0 {
 		t.Errorf("%+v, %v", r, err)
 	}
 	for what, c := range map[string]struct{ raw, why string }{
@@ -69,7 +69,7 @@ func TestParseRequestDefaultsAndRefusals(t *testing.T) {
 		"stream null":        {string(body(`[{"role":"user","content":"x"}]`, `,"stream":null`)), "stream"},
 		"no model":           {`{"max_tokens":1,"messages":[{"role":"user","content":"x"}]}`, "model"},
 	} {
-		_, err := ParseRequest([]byte(c.raw))
+		_, err := ParseRequest([]byte(c.raw), Unkeyed)
 		if err == nil || !strings.Contains(err.Error(), c.why) || !strings.HasPrefix(err.Error(), "body is not a Messages request: ") {
 			t.Errorf("%s: %v, want a refusal naming %q", what, err, c.why)
 		}
@@ -77,7 +77,7 @@ func TestParseRequestDefaultsAndRefusals(t *testing.T) {
 }
 
 func TestAToolResultWithNullContentHasNoText(t *testing.T) {
-	r, err := ParseRequest(body(`[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":null}]}]`, ``))
+	r, err := ParseRequest(body(`[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":null}]}]`, ``), Unkeyed)
 	if err != nil || len(r.LastUserTexts) != 0 {
 		t.Errorf("%q, %v", r.LastUserTexts, err)
 	}

@@ -15,7 +15,7 @@ import (
 
 // Command is coverage over the mock's own table, listing on stdout.
 func Command(stdout io.Writer) command.Command {
-	return Over(endpoint.For(account.Default(), nil), stdout)
+	return Over(endpoint.For(account.Default(), nil, nil), stdout)
 }
 
 // Over is coverage over table; Command is the one caller outside tests.

@@ -25,7 +25,7 @@ func resolveErr(t *testing.T, method, rawURL string) (Resolution, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return For(account.Default(), nil).Resolve(method, u.Host, u.EscapedPath())
+	return For(account.Default(), nil, nil).Resolve(method, u.Host, u.EscapedPath())
 }
 
 func TestNearMissesResolveToNothing(t *testing.T) {
@@ -114,7 +114,7 @@ func TestInScopeRequestsResolveToTheirRows(t *testing.T) {
 		}
 	}
 	var declared []ID
-	for _, e := range For(account.Default(), nil).Endpoints() {
+	for _, e := range For(account.Default(), nil, nil).Endpoints() {
 		if e.InScope() {
 			declared = append(declared, e.ID())
 		}
@@ -160,7 +160,7 @@ func TestRequestFormsThatDoNotChangeTheRow(t *testing.T) {
 
 func TestHostsAreTheEightCoveredHosts(t *testing.T) {
 	want := []string{hostAPI, hostPlatform, hostDownloads, hostGitHubRaw, hostDatadogLogs, hostDatadogBrowser, hostMCPProxy, hostClaudeAI}
-	if got := For(account.Default(), nil).Hosts(); !slices.Equal(got, want) {
+	if got := For(account.Default(), nil, nil).Hosts(); !slices.Equal(got, want) {
 		t.Errorf("hosts %v", got)
 	}
 }

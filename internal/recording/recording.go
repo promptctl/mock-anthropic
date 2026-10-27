@@ -20,22 +20,32 @@ import (
 )
 
 // Version is the form's version; a file of another version is refused rather than guessed at.
-const Version = 1
+const Version = 2
 
 // Exchange is one recorded Messages exchange: the request body as sent, and the assistant message it was
 // answered with. Only a successful `POST /v1/messages` is ever recorded, so the method, host, path and
 // status are not stored: each can hold one value. Reply is a script file's reply form (kind "message"),
 // read by script.ParseReply, so a replay renders it exactly as it renders a script's.
+//
+// MessageID is the id of the real reply: the request that continues the conversation names it, so a
+// replay answers with the same one. File is where Load read it from, and is empty for an exchange made
+// in memory; it is not part of the saved form.
 type Exchange struct {
-	Request json.RawMessage
-	Reply   json.RawMessage
+	Request   json.RawMessage
+	Reply     json.RawMessage
+	MessageID string
+	File      string
 }
 
 type wire struct {
-	Version int             `json:"version"`
-	Request json.RawMessage `json:"request"`
-	Reply   json.RawMessage `json:"reply"`
+	Version   int             `json:"version"`
+	Request   json.RawMessage `json:"request"`
+	Reply     json.RawMessage `json:"reply"`
+	MessageID string          `json:"message_id"`
 }
+
+// messageID is the shape of the API's message ids.
+var messageID = regexp.MustCompile(`^msg_[A-Za-z0-9_]+$`)
 
 // Parse is the one reader of a recording. [LAW:parse-dont-validate] An Exchange that came out of it has a
 // request that is a JSON object and a reply script.ParseReply accepts as a message.
@@ -52,7 +62,7 @@ func Parse(data []byte) (Exchange, error) {
 	if w.Version != Version {
 		return Exchange{}, fmt.Errorf("version %d, this mock reads version %d", w.Version, Version)
 	}
-	e := Exchange{Request: w.Request, Reply: w.Reply}
+	e := Exchange{Request: w.Request, Reply: w.Reply, MessageID: w.MessageID}
 	return e, e.check()
 }
 
@@ -68,6 +78,9 @@ func (e Exchange) check() error {
 	if _, ok := reply.(script.MessageReply); !ok {
 		return errors.New(`reply: expected kind "message"`)
 	}
+	if !messageID.MatchString(e.MessageID) {
+		return fmt.Errorf("message_id: expected msg_ and letters, digits or _, got %q", e.MessageID)
+	}
 	return nil
 }
 
@@ -76,7 +89,7 @@ func (e Exchange) marshal() ([]byte, error) {
 	if err := e.check(); err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(wire{Version, e.Request, e.Reply})
+	raw, err := json.Marshal(wire{Version, e.Request, e.Reply, e.MessageID})
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +131,7 @@ func Load(dir string) ([]Exchange, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
 		}
+		e.File = filepath.Join(dir, name)
 		out = append(out, e)
 	}
 	return out, nil
