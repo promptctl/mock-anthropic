@@ -63,9 +63,8 @@ func Files(a account.Account, trusted []string, now time.Time) ([]File, error) {
 	}}
 	config := map[string]any{
 		"hasCompletedOnboarding": true,
-		// Both keys: 2.1.299 downloads the official marketplace archive on first start unless it
-		// finds the install recorded as done, and that download is out of scope (mock-mock-flu.coa.3gi).
-		// The attempted flag alone retries it on 2.1.88 (officialMarketplaceStartupCheck.ts:76-117).
+		// Records the official marketplace install as done: 2.1.299 downloads the marketplace archive
+		// on first start unless it finds that, and the download is out of scope for the mock.
 		"officialMarketplaceAutoInstallAttempted": true,
 		"officialMarketplaceAutoInstalled":        true,
 		"oauthAccount": map[string]any{
