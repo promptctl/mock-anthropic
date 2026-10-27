@@ -20,7 +20,7 @@ import (
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
 )
 
-var hosts = endpoint.For(account.Default()).Hosts()
+var hosts = endpoint.For(account.Default(), nil).Hosts()
 
 func ensure(t *testing.T, dir string, hosts []string) Certificates {
 	t.Helper()

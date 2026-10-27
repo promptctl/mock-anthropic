@@ -109,8 +109,8 @@ type Table struct {
 	hosts     []string
 }
 
-// For is the mock's endpoint table answering as a: the one owner of the table `serve` and `coverage` use.
-func For(a account.Account) *Table { return mustBuild(Rows(a)) }
+// For is the mock's endpoint table answering as a, with the Messages row answering from scenarios (script directories): the one owner of the table `serve` and `coverage` use.
+func For(a account.Account, scenarios []string) *Table { return mustBuild(Rows(a, scenarios)) }
 
 func mustBuild(rows []Row) *Table {
 	t, err := Build(rows)

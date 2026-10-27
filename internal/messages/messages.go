@@ -141,8 +141,8 @@ func contentTexts(raw json.RawMessage) []string {
 	return texts
 }
 
-// Plausible, not counted: about four characters to a token, as English text runs.
-func tokens(text string) int {
+// Tokens is plausible, not counted: about four characters to a token, as English text runs.
+func Tokens(text string) int {
 	units := 0
 	for _, r := range text {
 		units += utf16.RuneLen(r)
@@ -170,7 +170,7 @@ func inputTokens(system, messages, tools json.RawMessage) int {
 		}
 	}
 	text.WriteByte(']')
-	return tokens(text.String())
+	return Tokens(text.String())
 }
 
 // decodeObject reads raw as exactly one JSON object into into. Unmarshal refuses trailing data, so

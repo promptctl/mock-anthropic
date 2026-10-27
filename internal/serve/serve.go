@@ -40,7 +40,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			}
 			s, err := server.Start(server.Options{
 				Port:   c.port,
-				Table:  endpoint.For(c.account),
+				Table:  endpoint.For(c.account, c.scenarios),
 				Handle: dispatch.Dispatch,
 				// Beside the binary: built at the repository root, the gitignored /certs/, so every run of
 				// one build presents the CA a consumer already trusts.
