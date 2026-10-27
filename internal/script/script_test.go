@@ -16,7 +16,7 @@ import (
 
 func request(t *testing.T, messagesJSON string) messages.Request {
 	t.Helper()
-	r, err := messages.ParseRequest([]byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"messages":` + messagesJSON + `}`))
+	r, err := messages.ParseRequest([]byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"messages":`+messagesJSON+`}`), messages.Unkeyed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func says(text string, match m) m {
 
 func selectReply(t *testing.T, dirs []string, builtIns []Script, r messages.Request) Selection {
 	t.Helper()
-	scripts, err := InOrder(dirs, builtIns)
+	scripts, err := InOrder(dirs, nil, builtIns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestAMalformedScriptFailsNamingItsPath(t *testing.T) {
 		t.Run(what, func(t *testing.T) {
 			d := t.TempDir()
 			path := write(t, d, "bad.json", c.script)
-			_, err := InOrder([]string{d}, nil)
+			_, err := InOrder([]string{d}, nil, nil)
 			var e *Error
 			if !errors.As(err, &e) || !strings.HasPrefix(err.Error(), "script "+path+": ") || !strings.Contains(err.Error(), c.reason) {
 				t.Errorf("%v, want %q after the path %s", err, c.reason, path)
@@ -385,7 +385,7 @@ func TestAScriptRemovedAfterTheListingIsNotAScript(t *testing.T) {
 func TestAHeaderNamedThreeTimesIsListedOnce(t *testing.T) {
 	d := t.TempDir()
 	write(t, d, "bad.json", m{"reply": m{"kind": "literal", "status": 429, "body": "", "headers": m{"X-A": "1", "x-a": "2", "X-a": "3"}}})
-	_, err := InOrder([]string{d}, nil)
+	_, err := InOrder([]string{d}, nil, nil)
 	if err == nil || !strings.HasSuffix(err.Error(), "names a field twice: x-a") {
 		t.Errorf("%v", err)
 	}
@@ -394,7 +394,7 @@ func TestAHeaderNamedThreeTimesIsListedOnce(t *testing.T) {
 func TestAToolNameOf64CharactersLoads(t *testing.T) {
 	d := t.TempDir()
 	write(t, d, "ok.json", m{"reply": m{"kind": "message", "stop_reason": "tool_use", "content": []m{{"type": "tool_use", "name": strings.Repeat("a", 64), "input": m{}}}}})
-	if _, err := InOrder([]string{d}, nil); err != nil {
+	if _, err := InOrder([]string{d}, nil, nil); err != nil {
 		t.Error(err)
 	}
 }

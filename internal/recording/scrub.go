@@ -64,7 +64,7 @@ func Scrub(e Exchange, secrets []string, a account.Account) (Scrubbed, Counts, e
 	}
 	// Longest first, so a secret that holds another is replaced whole.
 	slices.SortFunc(s.secrets, func(x, y string) int { return len(y) - len(x) })
-	var out Exchange
+	out := Exchange{MessageID: e.MessageID}
 	var err error
 	if out.Request, err = s.json(e.Request, ".request"); err != nil {
 		return Scrubbed{}, nil, err
@@ -91,6 +91,25 @@ func Scrub(e Exchange, secrets []string, a account.Account) (Scrubbed, Counts, e
 		return Scrubbed{}, nil, fmt.Errorf("scrubbing left %s", strings.Join(leaks, ", "))
 	}
 	return Scrubbed{out}, s.counts, nil
+}
+
+// scrubRequest scrubs one request body as Scrub scrubs a recorded one, with no credentials of its own to
+// replace (a live replay's request carries only the mock's), and re-checks the result.
+func scrubRequest(raw []byte, a account.Account) ([]byte, error) {
+	s := &scrubber{a: a, counts: Counts{}}
+	out, err := s.json(raw, ".request")
+	if err != nil {
+		return nil, err
+	}
+	v, err := decode(out)
+	if err != nil {
+		return nil, err
+	}
+	if leaks := s.leaks(v, ".request"); len(leaks) > 0 {
+		sort.Strings(leaks)
+		return nil, fmt.Errorf("scrubbing left %s", strings.Join(leaks, ", "))
+	}
+	return out, nil
 }
 
 type scrubber struct {

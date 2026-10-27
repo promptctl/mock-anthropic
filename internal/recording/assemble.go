@@ -23,9 +23,10 @@ var ErrIncomplete = errors.New("the event stream ended without message_stop")
 func refuse(format string, args ...any) error { return &Refused{fmt.Sprintf(format, args...)} }
 
 // Assemble reads a successful Messages response, a JSON message or a server-sent event stream by its
-// Content-Type, into the reply form (script.ParseReply's "message"). Only what a replay renders from is
-// kept: the content blocks and the stop reason. Usage, model, ids and signatures are not.
-func Assemble(contentType string, body []byte) (json.RawMessage, error) {
+// Content-Type, into the reply form (script.ParseReply's "message") and the message's id. Only what a
+// replay renders from is kept: the content blocks, the stop reason and the id. Usage, model and
+// signatures are not.
+func Assemble(contentType string, body []byte) (json.RawMessage, string, error) {
 	media, _, _ := mime.ParseMediaType(contentType)
 	var a assembly
 	var err error
@@ -35,12 +36,13 @@ func Assemble(contentType string, body []byte) (json.RawMessage, error) {
 	case "application/json":
 		err = a.message(body)
 	default:
-		return nil, refuse("response content type %q is neither a JSON message nor an event stream", contentType)
+		return nil, "", refuse("response content type %q is neither a JSON message nor an event stream", contentType)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return a.reply()
+	reply, err := a.reply()
+	return reply, a.id, err
 }
 
 type block struct {
@@ -55,6 +57,7 @@ type assembly struct {
 	blocks []*block
 	json   map[int]*strings.Builder // a tool_use block's input, as its partial_json arrived
 	stop   string
+	id     string // the message's id
 }
 
 func (a *assembly) reply() (json.RawMessage, error) {
@@ -71,7 +74,7 @@ func (a *assembly) reply() (json.RawMessage, error) {
 	}
 	// [LAW:single-enforcer] script.ParseReply decides what a message reply may be; a stop reason or a
 	// block it does not accept is refused here, with its words.
-	if err := (Exchange{Request: json.RawMessage(`{}`), Reply: out}).check(); err != nil {
+	if err := (Exchange{Request: json.RawMessage(`{}`), Reply: out, MessageID: a.id}).check(); err != nil {
 		return nil, refuse("%v", err)
 	}
 	return out, nil
@@ -111,6 +114,7 @@ func (a *assembly) add(raw json.RawMessage) error {
 // message reads a non-streamed response: the message itself.
 func (a *assembly) message(body []byte) error {
 	var m struct {
+		ID         string            `json:"id"`
 		Content    []json.RawMessage `json:"content"`
 		StopReason string            `json:"stop_reason"`
 	}
@@ -122,7 +126,7 @@ func (a *assembly) message(body []byte) error {
 			return err
 		}
 	}
-	a.stop = m.StopReason
+	a.stop, a.id = m.StopReason, m.ID
 	return nil
 }
 
@@ -133,9 +137,10 @@ func (a *assembly) stream(body []byte) error {
 	stopped := false
 	err := events(body, func(data []byte) error {
 		var ev struct {
-			Type         string          `json:"type"`
-			Index        int             `json:"index"`
-			ContentBlock json.RawMessage `json:"content_block"`
+			Type         string              `json:"type"`
+			Message      struct{ ID string } `json:"message"`
+			Index        int                 `json:"index"`
+			ContentBlock json.RawMessage     `json:"content_block"`
 			Delta        struct {
 				Type        string  `json:"type"`
 				Text        *string `json:"text"`
@@ -148,7 +153,9 @@ func (a *assembly) stream(body []byte) error {
 			return refuse("an event is not JSON: %v", err)
 		}
 		switch ev.Type {
-		case "ping", "message_start", "content_block_stop":
+		case "message_start":
+			a.id = ev.Message.ID
+		case "ping", "content_block_stop":
 		case "message_stop":
 			stopped = true
 		case "error":

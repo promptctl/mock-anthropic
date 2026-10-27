@@ -119,7 +119,7 @@ func (rc *Recorder) classify(resolution endpoint.Resolution, miss error, r gener
 	case status < 200 || status > 299:
 		return skip(fmt.Sprintf("upstream answered %d", status))
 	}
-	if parsed, err := messages.ParseRequest(r.Body); err == nil {
+	if parsed, err := messages.ParseRequest(r.Body, messages.Unkeyed); err == nil {
 		if m, ok := script.FirstReply(builtin.All(), parsed).(script.Matched); ok {
 			return skip("Claude Code's own model call: " + m.Origin)
 		}
@@ -200,11 +200,15 @@ func (t *tee) Close() error {
 var errScrub = errors.New("scrub")
 
 func (t *tee) save() (string, recording.Counts, error) {
-	reply, err := recording.Assemble(t.contentType, t.copy.Bytes())
+	reply, id, err := recording.Assemble(t.contentType, t.copy.Bytes())
 	if err != nil {
 		return "", nil, err
 	}
-	s, counts, err := recording.Scrub(recording.Exchange{Request: t.request, Reply: reply}, t.secrets, t.rc.Account)
+	// A replay refuses a recording with no key, so the recorder does not save one.
+	if _, err := messages.ReadKey(t.request); err != nil {
+		return "", nil, &recording.Refused{Why: "the request has no key: " + err.Error()}
+	}
+	s, counts, err := recording.Scrub(recording.Exchange{Request: t.request, Reply: reply, MessageID: id}, t.secrets, t.rc.Account)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", errScrub, err)
 	}

@@ -47,7 +47,7 @@ func get(t *testing.T, a account.Account, method, rawURL, body string) result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	table := endpoint.For(a, nil)
+	table := endpoint.For(a, nil, nil)
 	resolution, miss := table.Resolve(method, u.Host, u.EscapedPath())
 	d := dispatch.Dispatch(context.Background(), resolution, miss, generator.Request{Method: method, URL: u, Body: []byte(body)})
 	raw, err := io.ReadAll(d.Response.Body)
@@ -211,7 +211,7 @@ func TestTheTokenEndpointRefusesWhatIsNotTheMocksLogin(t *testing.T) {
 // organizationPaths are the in-scope rows whose path names an organization, with a request path for each.
 func organizationRows() []endpoint.Endpoint {
 	var rows []endpoint.Endpoint
-	for _, e := range endpoint.For(account.Default(), nil).Endpoints() {
+	for _, e := range endpoint.For(account.Default(), nil, nil).Endpoints() {
 		if e.InScope() && strings.Contains(e.Path(), "{org}") {
 			rows = append(rows, e)
 		}

@@ -23,7 +23,7 @@ func send(t *testing.T, method, rawURL, body string) (dispatch.Dispatched, strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolution, miss := endpoint.For(account.Default(), nil).Resolve(method, u.Host, u.EscapedPath())
+	resolution, miss := endpoint.For(account.Default(), nil, nil).Resolve(method, u.Host, u.EscapedPath())
 	d := dispatch.Dispatch(context.Background(), resolution, miss, generator.Request{Method: method, URL: u, Body: []byte(body)})
 	raw, err := io.ReadAll(d.Response.Body)
 	if err != nil {
@@ -66,7 +66,7 @@ func TestFixedAnswersAreTheSameOnEveryRequestAndReportNothing(t *testing.T) {
 func hasGenerator(e endpoint.Endpoint) bool { _, ok := e.Generator(); return ok }
 
 func TestEveryInScopeRowHasAGenerator(t *testing.T) {
-	for _, e := range endpoint.For(account.Default(), nil).Endpoints() {
+	for _, e := range endpoint.For(account.Default(), nil, nil).Endpoints() {
 		if e.InScope() && !hasGenerator(e) {
 			t.Errorf("%s has no generator", e.ID())
 		}

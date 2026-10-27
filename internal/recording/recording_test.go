@@ -19,12 +19,13 @@ func realUUID(n int) string {
 
 const (
 	oneReply = `{"kind":"message","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`
+	oneID    = "msg_01"
 	oneReq   = `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
 )
 
 func scrubbedFixture(t *testing.T) Scrubbed {
 	t.Helper()
-	s, _, err := Scrub(Exchange{Request: json.RawMessage(oneReq), Reply: json.RawMessage(oneReply)}, nil, account.Default())
+	s, _, err := Scrub(Exchange{Request: json.RawMessage(oneReq), Reply: json.RawMessage(oneReply), MessageID: oneID}, nil, account.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +73,15 @@ func TestWriterRefusesTheZeroScrubbed(t *testing.T) {
 }
 
 func TestParseRefusesWhatIsNotARecording(t *testing.T) {
-	good := `{"version":1,"request":` + oneReq + `,"reply":` + oneReply + `}`
+	good := `{"version":2,"request":` + oneReq + `,"reply":` + oneReply + `,"message_id":"` + oneID + `"}`
 	if _, err := Parse([]byte(good)); err != nil {
 		t.Fatalf("a recording: %v", err)
 	}
 	for name, bad := range map[string]string{
-		"another version":      strings.Replace(good, `"version":1`, `"version":2`, 1),
-		"an unknown key":       strings.Replace(good, `"version":1`, `"version":1,"extra":true`, 1),
+		"another version":      strings.Replace(good, `"version":2`, `"version":1`, 1),
+		"an unknown key":       strings.Replace(good, `"version":2`, `"version":2,"extra":true`, 1),
+		"no message id":        strings.Replace(good, `"message_id":"`+oneID+`"`, `"message_id":""`, 1),
+		"a bad message id":     strings.Replace(good, oneID, `not an id`, 1),
 		"a request not object": strings.Replace(good, oneReq, `[]`, 1),
 		"a literal reply":      strings.Replace(good, oneReply, `{"kind":"literal","status":200,"body":"x"}`, 1),
 		"data after":           good + `{}`,
@@ -93,7 +96,7 @@ func TestParseRefusesWhatIsNotARecording(t *testing.T) {
 func TestLoadOrdersByNumberNotByText(t *testing.T) {
 	dir := t.TempDir()
 	for _, n := range []string{"9999", "10000"} {
-		body := `{"version":1,"request":` + oneReq + `,"reply":` + strings.Replace(oneReply, `"hi"`, `"`+n+`"`, 1) + `}`
+		body := `{"version":2,"request":` + oneReq + `,"reply":` + strings.Replace(oneReply, `"hi"`, `"`+n+`"`, 1) + `,"message_id":"` + oneID + `"}`
 		if err := os.WriteFile(filepath.Join(dir, n+".json"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}

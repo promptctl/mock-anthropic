@@ -17,6 +17,8 @@ import (
 	"github.com/promptctl/mock-anthropic/internal/command"
 	"github.com/promptctl/mock-anthropic/internal/dispatch"
 	"github.com/promptctl/mock-anthropic/internal/endpoint"
+	"github.com/promptctl/mock-anthropic/internal/recording"
+	"github.com/promptctl/mock-anthropic/internal/script"
 	"github.com/promptctl/mock-anthropic/internal/server"
 )
 
@@ -24,7 +26,7 @@ import (
 func Command(stdout io.Writer, stderr *command.Log) command.Command {
 	return command.Command{
 		Kind:  command.Service,
-		Usage: "[--port N] [--scenarios DIR]... [--account FILE]",
+		Usage: "[--port N] [--scenarios DIR]... [--recordings DIR]... [--account FILE]",
 		Run: func(ctx context.Context, args []string, crash func(error), learn func(command.Facts)) (command.Result, error) {
 			c, err := parse(args)
 			if err != nil {
@@ -32,11 +34,13 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			}
 			return Launch(ctx, stdout, stderr, crash, learn, server.Options{
 				Port:   c.port,
-				Table:  endpoint.For(c.account, c.scenarios),
+				Table:  endpoint.For(c.account, c.scenarios, c.recorded),
 				Handle: dispatch.Dispatch,
 			}, command.Facts{
 				"account_file": c.accountFile,
 				"scenarios":    c.scenarios,
+				"recordings":   c.recordings,
+				"shadowed":     c.shadowed,
 			})
 		},
 	}
@@ -109,6 +113,9 @@ func Sink(log *command.Log, crash func(error)) func(server.Event) {
 type config struct {
 	port        int
 	scenarios   []string
+	recordings  []string
+	recorded    []script.Script // the recordings, loaded: one script, or none
+	shadowed    []string        // recordings no request can reach, for a key an earlier one has
 	accountFile *string         // nil: the default account
 	account     account.Account // checked now; the endpoint table answers as it
 }
@@ -117,11 +124,12 @@ type config struct {
 // is a UsageError naming its cause.
 func parse(args []string) (config, error) {
 	port, accountFlag := &cmdline.Once{}, &cmdline.Once{}
-	var scenarios cmdline.List
+	var scenarios, recordings cmdline.List
 	rest, err := cmdline.Flags("serve", func(fs *flag.FlagSet) {
 		fs.Var(port, "port", "")
 		fs.Var(accountFlag, "account", "")
 		fs.Var(&scenarios, "scenarios", "")
+		fs.Var(&recordings, "recordings", "")
 	}, args)
 	if err != nil {
 		return config{}, err
@@ -129,7 +137,7 @@ func parse(args []string) (config, error) {
 	if len(rest) > 0 {
 		return config{}, &command.UsageError{Why: "unexpected argument: " + rest[0]}
 	}
-	c := config{scenarios: []string{}, account: account.Default()}
+	c := config{scenarios: []string{}, recordings: []string{}, shadowed: []string{}, account: account.Default()}
 	if port.Value != nil {
 		n, err := cmdline.Port("--port", *port.Value, 0)
 		if err != nil {
@@ -160,6 +168,22 @@ func parse(args []string) (config, error) {
 			return config{}, err
 		}
 		c.accountFile, c.account = &path, a
+	}
+	// Loaded once and after the account, which the recordings are scrubbed as; a recording is captured
+	// traffic, not something a test writes while the mock runs.
+	for _, dir := range recordings {
+		path, err := cmdline.Directory("--recordings", dir)
+		if err != nil {
+			return config{}, err
+		}
+		c.recordings = append(c.recordings, path)
+	}
+	if len(c.recordings) > 0 {
+		recorded, shadowed, err := recording.Scripts(c.recordings, c.account)
+		if err != nil {
+			return config{}, &command.UsageError{Why: "--recordings: " + err.Error()}
+		}
+		c.recorded, c.shadowed = []script.Script{recorded}, shadowed
 	}
 	return c, nil
 }

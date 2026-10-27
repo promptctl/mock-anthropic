@@ -52,8 +52,18 @@ type LiteralReply struct {
 	Body   []byte
 }
 
-func (MessageReply) reply() {}
-func (LiteralReply) reply() {}
+// RecordedReply is a message reply that keeps the id of the real reply it was recorded from, so that the
+// request which continues the conversation names it (`diagnostics.previous_message_id`). File is the
+// recording it came from. Only package recording makes one; a script file's form cannot carry an id.
+type RecordedReply struct {
+	MessageReply
+	ID   string
+	File string
+}
+
+func (MessageReply) reply()  {}
+func (LiteralReply) reply()  {}
+func (RecordedReply) reply() {}
 
 // Block is one content block of a message reply.
 type Block interface{ block() }
@@ -110,14 +120,14 @@ func FirstReply(scripts []Script, r messages.Request) Selection {
 }
 
 // InOrder is [LAW:one-source-of-truth] the one place the order is written: consumer directories in the
-// order given, then the built-ins. Directories are read on every call, so a script written after the
-// mock started answers the next request.
-func InOrder(dirs []string, builtIns []Script) ([]Script, error) {
+// order given, then the recordings, then the built-ins. Directories are read on every call, so a script
+// written after the mock started answers the next request; recordings are loaded once, by the caller.
+func InOrder(dirs []string, recorded []Script, builtIns []Script) ([]Script, error) {
 	scripts, err := Read(dirs)
 	if err != nil {
 		return nil, err
 	}
-	return append(scripts, builtIns...), nil
+	return append(append(scripts, recorded...), builtIns...), nil
 }
 
 // Error is a script, or a scripts directory, that cannot be used; the text names its path.

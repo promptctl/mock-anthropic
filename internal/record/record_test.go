@@ -100,7 +100,7 @@ func start(t *testing.T) *rig {
 	totals := &Totals{}
 	rc := &Recorder{Upstream: up.transport(), Writer: w, Account: account.Default(), Totals: totals}
 	events := make(chan server.RequestEvent, 64)
-	s, err := server.Start(server.Options{Table: endpoint.For(account.Default(), nil), Handle: rc.Handle, CertsDir: certsDir,
+	s, err := server.Start(server.Options{Table: endpoint.For(account.Default(), nil, nil), Handle: rc.Handle, CertsDir: certsDir,
 		Emit: func(e server.Event) {
 			if r, ok := e.(server.RequestEvent); ok {
 				events <- r
@@ -157,7 +157,7 @@ func sseBody(text string) string {
 }
 
 func messagesRequest() string {
-	return fmt.Sprintf(`{"model":"m","stream":true,"max_tokens":50,"metadata":{"user_id":"user_%s_account_%s_session_%s"},"messages":[{"role":"user","content":"I am %s in org %s, key %s"}]}`,
+	return fmt.Sprintf(`{"model":"m","stream":true,"max_tokens":50,"diagnostics":{"previous_message_id":null},"metadata":{"user_id":"user_%s_account_%s_session_%s"},"messages":[{"role":"user","content":"I am %s in org %s, key %s"}]}`,
 		userHash, realAcct, uuid(3), realEmail, realOrg, secretToken)
 }
 
@@ -198,9 +198,9 @@ func TestAnAPIKeyLoginIsScrubbedToo(t *testing.T) {
 	key := "sk-ant-" + "api03-" + strings.Repeat("Zq9", 8)
 	r.up.hook = func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"content":[{"type":"text","text":"your key is `+key+`"}],"stop_reason":"end_turn"}`)
+		io.WriteString(w, `{"id":"msg_2","content":[{"type":"text","text":"your key is `+key+`"}],"stop_reason":"end_turn"}`)
 	}
-	r.post(t, "/v1/messages", `{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, http.Header{"X-Api-Key": {key}})
+	r.post(t, "/v1/messages", `{"model":"m","max_tokens":5,"diagnostics":{"previous_message_id":null},"messages":[{"role":"user","content":"hi"}]}`, http.Header{"X-Api-Key": {key}})
 	files := r.saved(t)
 	if len(files) != 1 || strings.Contains(files[0], key) {
 		t.Errorf("recordings %v", files)
@@ -236,6 +236,19 @@ func TestExchangesThatAreNotSavedSayWhy(t *testing.T) {
 	}
 	if len(r.saved(t)) != 0 || r.totals.Skipped.Load() != 3 {
 		t.Errorf("saved %d, skipped %d", len(r.saved(t)), r.totals.Skipped.Load())
+	}
+}
+
+func TestARequestWithNoKeyIsRefusedBecauseReplayCouldNotLoadIt(t *testing.T) {
+	r := start(t)
+	r.up.hook = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"msg_x","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}`)
+	}
+	_, _, ev := r.post(t, "/v1/messages", `{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	rec, _ := ev.Facts["recording"].(map[string]any)
+	if got, _ := rec["refused"].(string); !strings.Contains(got, "no diagnostics.previous_message_id") || len(r.saved(t)) != 0 || r.totals.Refused.Load() != 1 {
+		t.Errorf("facts %v, saved %d, refused %d", ev.Facts, len(r.saved(t)), r.totals.Refused.Load())
 	}
 }
 

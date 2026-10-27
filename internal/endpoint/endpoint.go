@@ -15,6 +15,7 @@ import (
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/generator"
+	"github.com/promptctl/mock-anthropic/internal/script"
 )
 
 // ID names one row of a table.
@@ -109,8 +110,10 @@ type Table struct {
 	hosts     []string
 }
 
-// For is the mock's endpoint table answering as a, with the Messages row answering from scenarios (script directories): the one owner of the table `serve` and `coverage` use.
-func For(a account.Account, scenarios []string) *Table { return mustBuild(Rows(a, scenarios)) }
+// For is the mock's endpoint table answering as a, with the Messages row answering from scenarios (script directories), then recorded (loaded recordings): the one owner of the table `serve` and `coverage` use.
+func For(a account.Account, scenarios []string, recorded []script.Script) *Table {
+	return mustBuild(Rows(a, scenarios, recorded))
+}
 
 func mustBuild(rows []Row) *Table {
 	t, err := Build(rows)

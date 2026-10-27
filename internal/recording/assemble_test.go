@@ -41,7 +41,7 @@ func goodStream() [][]string {
 }
 
 func TestAssembleReadsTheWholeEventSet(t *testing.T) {
-	reply, err := Assemble(stream, sse(goodStream()[0]...))
+	reply, _, err := Assemble(stream, sse(goodStream()[0]...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestAssembleReadsTheWholeEventSet(t *testing.T) {
 
 func TestAssembleReadsAJSONMessage(t *testing.T) {
 	body := `{"id":"msg_1","model":"m","usage":{},"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`
-	reply, err := Assemble("application/json", []byte(body))
+	reply, _, err := Assemble("application/json", []byte(body))
 	if err != nil || string(reply) != `{"kind":"message","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}` {
 		t.Errorf("%s, %v", reply, err)
 	}
@@ -82,7 +82,7 @@ func TestAssembleRefusesWhatItCannotFullyRead(t *testing.T) {
 		"a message that is not":              {"application/json", []byte("[]"), "not a JSON message"},
 		"no content":                         {"application/json", []byte(`{"content":[],"stop_reason":"end_turn"}`), "no content blocks"},
 	} {
-		_, err := Assemble(c.contentType, c.body)
+		_, _, err := Assemble(c.contentType, c.body)
 		var refused *Refused
 		if !errors.As(err, &refused) || !strings.Contains(refused.Why, c.want) {
 			t.Errorf("%s: %v, want a refusal mentioning %q", name, err, c.want)
@@ -92,7 +92,7 @@ func TestAssembleRefusesWhatItCannotFullyRead(t *testing.T) {
 
 func TestAssembleNamesAStreamCutShort(t *testing.T) {
 	good := goodStream()[0]
-	if _, err := Assemble(stream, sse(good[:len(good)-1]...)); !errors.Is(err, ErrIncomplete) {
+	if _, _, err := Assemble(stream, sse(good[:len(good)-1]...)); !errors.Is(err, ErrIncomplete) {
 		t.Errorf("a stream without message_stop: %v", err)
 	}
 }

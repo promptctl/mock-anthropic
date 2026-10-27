@@ -30,28 +30,35 @@ func render(ctx context.Context, reply script.Reply, request messages.Request, s
 		response := generator.Response{Status: reply.Status, Header: reply.Header.Clone(), Body: bytes.NewReader(reply.Body)}
 		return response, generator.Facts{"kind": "literal", "status": reply.Status}, nil
 	case script.MessageReply:
-		m := assistantMessage(reply, request, seen.next(request.Raw))
-		if !request.Stream {
-			body, err := marshal(m.message)
-			if err != nil {
-				return generator.Response{}, nil, err
-			}
-			response := generator.Response{Status: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: bytes.NewReader(body)}
-			return response, generator.Facts{"kind": "json", "id": m.message.ID, "stop_reason": *m.message.StopReason}, nil
-		}
-		frames, err := m.frames()
+		return renderMessage(ctx, reply, func(generated string) string { return generated }, request, seen)
+	case script.RecordedReply:
+		return renderMessage(ctx, reply.MessageReply, func(string) string { return reply.ID }, request, seen)
+	}
+	return generator.Response{}, nil, fmt.Errorf("a script gave a reply of type %T, which is neither a message nor a literal", reply)
+}
+
+// renderMessage renders a message reply; id turns the id generated from the request into the one sent.
+func renderMessage(ctx context.Context, reply script.MessageReply, id func(string) string, request messages.Request, seen *occurrences) (generator.Response, generator.Facts, error) {
+	m := assistantMessage(reply, id, request, seen.next(request.Raw))
+	if !request.Stream {
+		body, err := marshal(m.message)
 		if err != nil {
 			return generator.Response{}, nil, err
 		}
-		response := generator.Response{
-			Status: http.StatusOK,
-			Header: http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}, "Cache-Control": {"no-cache"}},
-			Body:   &stream{ctx: ctx, frames: frames, delay: reply.EventDelay},
-		}
-		facts := generator.Facts{"kind": "stream", "id": m.message.ID, "stop_reason": *m.message.StopReason, "event_delay_ms": reply.EventDelay.Milliseconds()}
-		return response, facts, nil
+		response := generator.Response{Status: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: bytes.NewReader(body)}
+		return response, generator.Facts{"kind": "json", "id": m.message.ID, "stop_reason": *m.message.StopReason}, nil
 	}
-	return generator.Response{}, nil, fmt.Errorf("a script gave a reply of type %T, which is neither a message nor a literal", reply)
+	frames, err := m.frames()
+	if err != nil {
+		return generator.Response{}, nil, err
+	}
+	response := generator.Response{
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}, "Cache-Control": {"no-cache"}},
+		Body:   &stream{ctx: ctx, frames: frames, delay: reply.EventDelay},
+	}
+	facts := generator.Facts{"kind": "stream", "id": m.message.ID, "stop_reason": *m.message.StopReason, "event_delay_ms": reply.EventDelay.Milliseconds()}
+	return response, facts, nil
 }
 
 // The API's content blocks, as a reply's blocks become once they have ids and signatures. Their fields
@@ -119,7 +126,7 @@ func digest(parts ...string) string {
 
 const idHex = 24
 
-func assistantMessage(reply script.MessageReply, request messages.Request, occurrence int) assistant {
+func assistantMessage(reply script.MessageReply, id func(generated string) string, request messages.Request, occurrence int) assistant {
 	requestDigest := digest(request.Raw, fmt.Sprint(occurrence))
 	a := assistant{}
 	output := 0
@@ -131,7 +138,7 @@ func assistantMessage(reply script.MessageReply, request messages.Request, occur
 	}
 	stop := string(reply.StopReason)
 	a.message = message{
-		ID:         "msg_" + requestDigest[:idHex],
+		ID:         id("msg_" + requestDigest[:idHex]),
 		Type:       "message",
 		Role:       "assistant",
 		Model:      request.Model,
