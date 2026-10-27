@@ -245,12 +245,11 @@ func Command(now func() time.Time) command.Command {
 			if len(rest) > 1 {
 				return command.Result{}, &command.UsageError{Why: "unexpected argument: " + rest[1]}
 			}
-			path, err := cmdline.Absolute("<config-dir>", rest[0])
+			// NFC, so the keychain name matches what Claude Code reads.
+			configDir, err := cmdline.ConfigPath("<config-dir>", rest[0])
 			if err != nil {
 				return command.Result{}, err
 			}
-			// NFC, as Claude Code reads CLAUDE_CONFIG_DIR (utils/envUtils.ts:7), so the keychain name matches.
-			configDir := norm.NFC.String(path)
 			// One entry per project, however many spellings of it were given: `projects` holds one key for it.
 			seen, trusted := map[string]bool{}, []string{}
 			for _, dir := range trust {

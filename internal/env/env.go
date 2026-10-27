@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/promptctl/mock-anthropic/internal/cmdline"
 	"github.com/promptctl/mock-anthropic/internal/command"
@@ -30,15 +31,13 @@ func Variables(port int, ca, configDir string) []Variable {
 	}
 }
 
-var portText = regexp.MustCompile(`^\d{1,5}$`)
-
 var plain = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
 // Render is v as one line a shell reads back to the same value: a value is single-quoted unless it is
-// made only of characters no shell treats specially. A newline has no one-line rendering.
+// made only of characters no shell treats specially. A control character (a newline, a carriage return) has no one-line rendering.
 func Render(v Variable) (string, error) {
-	if strings.ContainsRune(v.Value, '\n') {
-		return "", &command.UsageError{Why: fmt.Sprintf("%s: a path holding a newline cannot be one line", v.Name)}
+	if strings.IndexFunc(v.Value, unicode.IsControl) >= 0 {
+		return "", &command.UsageError{Why: fmt.Sprintf("%s: a path holding a control character cannot be one line", v.Name)}
 	}
 	if plain.MatchString(v.Value) {
 		return v.Name + "=" + v.Value, nil
@@ -64,20 +63,23 @@ func Command(stdout io.Writer) command.Command {
 			if len(rest) > 0 {
 				return command.Result{}, &command.UsageError{Why: "unexpected argument: " + rest[0]}
 			}
-			for name, f := range map[string]*cmdline.Once{"--port": port, "--ca": ca, "--config-dir": configDir} {
-				if f.Value == nil {
-					return command.Result{}, &command.UsageError{Why: "missing " + name}
+			for _, f := range []struct {
+				name string
+				once *cmdline.Once
+			}{{"--port", port}, {"--ca", ca}, {"--config-dir", configDir}} {
+				if f.once.Value == nil {
+					return command.Result{}, &command.UsageError{Why: "missing " + f.name}
 				}
 			}
-			n, err := strconv.Atoi(*port.Value)
-			if !portText.MatchString(*port.Value) || err != nil || n < 1 || n > 65535 {
-				return command.Result{}, &command.UsageError{Why: fmt.Sprintf("--port %q: not a port number from 1 to 65535", *port.Value)}
+			n, err := cmdline.Port("--port", *port.Value, 1)
+			if err != nil {
+				return command.Result{}, err
 			}
 			caPath, err := cmdline.File("--ca", *ca.Value)
 			if err != nil {
 				return command.Result{}, err
 			}
-			dir, err := cmdline.Absolute("--config-dir", *configDir.Value)
+			dir, err := cmdline.ConfigDirectory("--config-dir", *configDir.Value)
 			if err != nil {
 				return command.Result{}, err
 			}
@@ -94,10 +96,10 @@ func Command(stdout io.Writer) command.Command {
 			}
 			// [LAW:nothing-unseen] The record names what was printed, not only that something was.
 			facts := command.Facts{"port": n, "ca": caPath, "config_dir": dir, "variables": names}
-			learn(facts)
 			if _, err := io.WriteString(stdout, out.String()); err != nil {
 				return command.Result{}, fmt.Errorf("writing the variables: %w", err)
 			}
+			learn(facts)
 			return command.Result{Answer: command.OK, Facts: facts}, nil
 		},
 	}

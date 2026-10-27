@@ -432,14 +432,18 @@ func TestEnvPrintsTheVariablesAndRecordsThem(t *testing.T) {
 	if err := os.WriteFile(ca, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f := run(t, "env", "--port", "4040", "--ca", ca, "--config-dir", "/tmp/claude")
+	cfg := filepath.Join(t.TempDir(), "claude")
+	if err := os.Mkdir(cfg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := run(t, "env", "--port", "4040", "--ca", ca, "--config-dir", cfg)
 	if f.exit != 0 {
 		t.Fatalf("exit %d, record %v", f.exit, f.record)
 	}
-	if !strings.Contains(f.stdout, "HTTPS_PROXY=http://127.0.0.1:4040\n") || !strings.Contains(f.stdout, "CLAUDE_CONFIG_DIR=/tmp/claude\n") {
+	if !strings.Contains(f.stdout, "HTTPS_PROXY=http://127.0.0.1:4040\n") || !strings.Contains(f.stdout, "CLAUDE_CONFIG_DIR="+cfg+"\n") {
 		t.Errorf("stdout %q", f.stdout)
 	}
-	if facts := f.record["facts"].(map[string]any); facts["port"] != float64(4040) || facts["config_dir"] != "/tmp/claude" {
+	if facts := f.record["facts"].(map[string]any); facts["port"] != float64(4040) || facts["config_dir"] != cfg {
 		t.Errorf("facts %v", facts)
 	}
 }
