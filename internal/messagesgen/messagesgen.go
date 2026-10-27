@@ -25,12 +25,17 @@ import (
 // FAILED line naming its path, on every Messages request (PROJECT.md "A bad script").
 func New(a account.Account, dirs []string, recorded, builtIns []script.Script) generator.Func {
 	seen := &occurrences{count: map[[sha256.Size]byte]int{}}
+	// Only a mock with recordings compares requests by key, so only it scrubs and reads every body.
+	canonicalize := messages.Unkeyed
+	if len(recorded) > 0 {
+		canonicalize = func(body []byte) (messages.Canonical, error) { return recording.Canonicalize(body, a) }
+	}
 	return func(ctx context.Context, _ map[string]string, r generator.Request) (generator.Answer, error) {
 		scripts, err := script.InOrder(dirs, recorded, builtIns)
 		if err != nil {
 			return generator.Answer{}, err
 		}
-		request, err := messages.ParseRequest(r.Body, func(body []byte) (messages.Canonical, error) { return recording.Canonicalize(body, a) })
+		request, err := messages.ParseRequest(r.Body, canonicalize)
 		var failed *messages.CanonicalizeError
 		if errors.As(err, &failed) {
 			return generator.Answer{}, err

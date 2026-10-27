@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/promptctl/mock-anthropic/internal/account"
 )
@@ -37,5 +38,18 @@ func TestAssembleKeepsTheMessagesRealID(t *testing.T) {
 	}
 	if _, _, err = Assemble("application/json", []byte(`{"content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}`)); err == nil {
 		t.Error("a message with no id was assembled: a recording of it could never be continued")
+	}
+}
+
+func TestAKeyFactCutsALongPromptOnACharacterBoundary(t *testing.T) {
+	// Each character is three bytes, so byte maxText falls inside one.
+	prompt := strings.Repeat("\u65e5", maxText)
+	c, err := Canonicalize([]byte(`{"diagnostics":{"previous_message_id":null},"messages":[{"role":"user","content":"`+prompt+`"}]}`), account.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := c.Facts()["key"].(map[string]any)["last_text"].(string)
+	if !utf8.ValidString(last) || len(last) > maxText || last == "" {
+		t.Errorf("last_text %q", last)
 	}
 }

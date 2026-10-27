@@ -204,6 +204,10 @@ func (t *tee) save() (string, recording.Counts, error) {
 	if err != nil {
 		return "", nil, err
 	}
+	// A replay refuses a recording with no key, so the recorder does not save one.
+	if _, err := messages.ReadKey(t.request); err != nil {
+		return "", nil, &recording.Refused{Why: "the request has no key: " + err.Error()}
+	}
 	s, counts, err := recording.Scrub(recording.Exchange{Request: t.request, Reply: reply, MessageID: id}, t.secrets, t.rc.Account)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", errScrub, err)

@@ -32,7 +32,7 @@ func (h HasKey) Facts() map[string]any {
 	}
 	last := k.LastText
 	if len(last) > maxText {
-		last = last[:maxText]
+		last = strings.ToValidUTF8(last[:maxText], "")
 	}
 	key := map[string]any{"sha256": hex.EncodeToString(digest[:8]), "last_text": last, "results": results}
 	if k.Thread.Continue {

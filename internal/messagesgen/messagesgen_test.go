@@ -320,7 +320,7 @@ func TestTheRecordedFactsNameTheScriptAndWhatWasSent(t *testing.T) {
 	dir := scripts(t, reply(`[{"type":"text","text":"hi"}]`, "end_turn"))
 	m := decode(t, send(t, context.Background(), []string{dir}, body("hello", false)).body)
 	s := send(t, context.Background(), []string{dir}, body("hello", false))
-	want := generator.Facts{"key": "none: the request carries no diagnostics.previous_message_id", "script": filepath.Join(dir, "any.json"), "reply": generator.Facts{"kind": "json", "id": m["id"], "stop_reason": "end_turn"}}
+	want := generator.Facts{"key": "not asked", "script": filepath.Join(dir, "any.json"), "reply": generator.Facts{"kind": "json", "id": m["id"], "stop_reason": "end_turn"}}
 	if !reflect.DeepEqual(s.d.Facts, want) {
 		t.Errorf("facts %v, want %v", s.d.Facts, want)
 	}
