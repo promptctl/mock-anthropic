@@ -3,6 +3,7 @@ package endpoint
 import (
 	"github.com/promptctl/mock-anthropic/internal/account"
 	"github.com/promptctl/mock-anthropic/internal/accountgen"
+	"github.com/promptctl/mock-anthropic/internal/builtin"
 	"github.com/promptctl/mock-anthropic/internal/messagesgen"
 	"github.com/promptctl/mock-anthropic/internal/servicegen"
 )
@@ -44,7 +45,7 @@ func Rows(a account.Account, scenarios []string) []Row {
 	g := accountgen.New(a)
 	s := servicegen.New()
 	return []Row{
-		InScope("messages", API, "POST", "/v1/messages", messagesgen.New(scenarios, nil)),
+		InScope("messages", API, "POST", "/v1/messages", messagesgen.New(scenarios, builtin.All())),
 		InScope("messages-count-tokens", API, "POST", "/v1/messages/count_tokens", s.CountTokens),
 		InScope("oauth-profile", API, "GET", "/api/oauth/profile", g.Profile),
 		InScope("oauth-roles", API, "GET", "/api/oauth/claude_cli/roles", g.Roles),
