@@ -32,27 +32,27 @@ func New() Set {
 		CountTokens: countTokens,
 		// No flags. Both builds read an empty map as no payload and keep the flags the config dir cached,
 		// so a fresh one runs every flag at its default.
-		FeatureFlags: json(map[string]any{"features": map[string]any{}}),
+		FeatureFlags: fixedJSON(map[string]any{"features": map[string]any{}}),
 		// Neither build reads these answers' bodies, and 2.1.289 may gzip what it sends, so the request
 		// body is not read either. 2.1.289's error tracking logs a status other than 2xx as a warning.
-		EventLoggingBatch:    json(map[string]any{}),
-		EventLoggingV2Batch:  json(map[string]any{}),
-		DatadogLogs:          json(map[string]any{}),
-		DatadogErrorTracking: json(map[string]any{}),
+		EventLoggingBatch:    fixedJSON(map[string]any{}),
+		EventLoggingV2Batch:  fixedJSON(map[string]any{}),
+		DatadogLogs:          fixedJSON(map[string]any{}),
+		DatadogErrorTracking: fixedJSON(map[string]any{}),
 		// Off: on, 2.1.289's BigQuery exporter posts to the refused `otel-metrics` row.
-		MetricsEnabled: json(map[string]any{"metrics_logging_enabled": false}),
+		MetricsEnabled: fixedJSON(map[string]any{"metrics_logging_enabled": false}),
 		// No settings: both builds read a 204 as none configured.
 		RemoteManagedSettings: noContent,
 		// No restrictions. 2.1.289 reads a 404 here as a proxy that did not forward the request.
-		PolicyLimits: json(map[string]any{"restrictions": map[string]any{}}),
-		PenguinMode:  json(map[string]any{"enabled": false, "disabled_reason": nil}),
+		PolicyLimits: fixedJSON(map[string]any{"restrictions": map[string]any{}}),
+		PenguinMode:  fixedJSON(map[string]any{"enabled": false, "disabled_reason": nil}),
 		// Off. Claude Code decides from the config dir's cached answer, which this one replaces in the
 		// background, so on a fresh config dir the consent notice and its refused `account-settings` call
 		// never run.
-		GroveConfig: json(map[string]any{"grove_enabled": false, "domain_excluded": false, "notice_is_grace_period": true, "notice_reminder_frequency": nil}),
+		GroveConfig: fixedJSON(map[string]any{"grove_enabled": false, "domain_excluded": false, "notice_is_grace_period": true, "notice_reminder_frequency": nil}),
 		// No servers. 2.1.289 asks for the next page while `metadata.nextCursor` is set.
-		MCPRegistry: json(map[string]any{"servers": []any{}, "metadata": map[string]any{}}),
-		MCPServers:  json(map[string]any{"data": []any{}, "next_page": nil}),
+		MCPRegistry: fixedJSON(map[string]any{"servers": []any{}, "metadata": map[string]any{}}),
+		MCPServers:  fixedJSON(map[string]any{"data": []any{}, "next_page": nil}),
 		// Claude Code next fetches `{sha}.zip`, which the table refuses, unless the config dir it runs
 		// with says the official marketplace is installed or its auto-install already ran.
 		MarketplaceVersion: text(marketplaceSHA + "\n"),
@@ -63,7 +63,7 @@ func New() Set {
 
 // [LAW:one-type-per-behavior] A fixed answer: the same response to every request, with nothing decided
 // to report. A body is read once, so each request gets a new reader.
-func json(body map[string]any) generator.Func {
+func fixedJSON(body map[string]any) generator.Func {
 	return func(context.Context, map[string]string, generator.Request) (generator.Answer, error) {
 		return generator.JSON(body, nil)
 	}

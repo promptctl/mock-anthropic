@@ -135,9 +135,11 @@ func TestTheSystemPromptAndToolsCount(t *testing.T) {
 
 func TestABodyThatIsNotATokenCountRequestIsDeclinedSayingWhy(t *testing.T) {
 	for name, c := range map[string]struct{ body, why string }{
-		"not JSON":                      {"model=x", "body is not JSON"},
-		"JSON then more":                {`{"model":"m","messages":[]} x`, "body is not JSON"},
-		"not an object":                 {`[1]`, "body is not a token count request: expected an object, got an array"},
+		"not JSON":                      {"model=x", "not a JSON object"},
+		"JSON then more":                {`{"model":"m","messages":[]} x`, "not a JSON object"},
+		"not an object":                 {`[1]`, "body is not a token count request: not a JSON object"},
+		"a stray closer":                {`{"model":"m","messages":[{"role":"user","content":"x"}]}}`, "body is not a token count request: not a JSON object"},
+		"null content":                  {`{"model":"m","messages":[{"role":"user","content":null}]}`, "content"},
 		"no model":                      {`{"messages":[{"role":"user","content":"x"}]}`, "body is not a token count request: model"},
 		"no messages":                   {`{"model":"m","messages":[]}`, "body is not a token count request: messages"},
 		"messages that are not":         {`{"model":"m","messages":[1]}`, "body is not a token count request: messages[0]"},

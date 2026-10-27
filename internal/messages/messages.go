@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"unicode/utf16"
 )
 
 // CountTokensRequest is a `POST /v1/messages/count_tokens` body that parsed. [LAW:parse-dont-validate]
@@ -26,17 +25,27 @@ func ParseCountTokens(raw []byte) (CountTokensRequest, error) {
 		Messages json.RawMessage `json:"messages"`
 		Tools    json.RawMessage `json:"tools"`
 	}
+	const notOne = "body is not a token count request: %w"
 	if err := decodeObject(raw, &body); err != nil {
-		return CountTokensRequest{}, err
+		return CountTokensRequest{}, fmt.Errorf(notOne, err)
 	}
 	if err := checkBase(body.Model, body.System, body.Messages); err != nil {
-		return CountTokensRequest{}, fmt.Errorf("body is not a token count request: %w", err)
+		return CountTokensRequest{}, fmt.Errorf(notOne, err)
 	}
 	return CountTokensRequest{InputTokens: inputTokens(body.System, body.Messages, body.Tools)}, nil
 }
 
 // Plausible, not counted: about four characters to a token, as English text runs.
-func tokens(text string) int { return (len(utf16.Encode([]rune(text))) + 3) / 4 }
+func tokens(text string) int {
+	units := 0
+	for _, r := range text {
+		units++
+		if r >= 0x10000 {
+			units++ // a surrogate pair
+		}
+	}
+	return (units + 3) / 4
+}
 
 // [LAW:one-source-of-truth] A request's input tokens, the one count both a token count answer and a
 // Messages reply's usage give: its system prompt, messages and tools as sent, and none of the fields
@@ -61,20 +70,13 @@ func inputTokens(system, messages, tools json.RawMessage) int {
 	return tokens(text.String())
 }
 
-// decodeObject reads raw as exactly one JSON object into into.
+// decodeObject reads raw as exactly one JSON object into into: Unmarshal refuses trailing data and
+// any value that is not an object, so no second pass can disagree with the first.
 func decodeObject(raw []byte, into any) error {
-	var value any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := decoder.Decode(&value); err != nil {
-		return fmt.Errorf("body is not JSON: %w", err)
+	if err := json.Unmarshal(raw, into); err != nil {
+		return fmt.Errorf("not a JSON object: %w", err)
 	}
-	if decoder.More() {
-		return errors.New("body is not JSON: data after the value")
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return fmt.Errorf("body is not a token count request: expected an object, got %s", kindOf(value))
-	}
-	return json.Unmarshal(raw, into)
+	return nil
 }
 
 // checkBase is what a Messages request and a token count request share: `model` is a non-empty
@@ -134,6 +136,10 @@ func checkMessage(raw json.RawMessage) error {
 	case "user", "assistant", "system":
 	default:
 		return fmt.Errorf("role: expected user, assistant or system, got %q", message.Role)
+	}
+	// Unmarshal reads null into a string as a no-op, so a null content would pass as an empty one.
+	if bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
+		return errors.New("content: expected a string or a list of blocks, got null")
 	}
 	if err := checkContent(message.Content, checkMessageBlock); err != nil {
 		return fmt.Errorf("content: %w", err)
@@ -224,18 +230,4 @@ func checkToolResultBlock(raw json.RawMessage) error {
 		return errors.New("a tool_result block cannot hold a tool_result block")
 	}
 	return nil
-}
-
-func kindOf(value any) string {
-	switch value.(type) {
-	case []any:
-		return "an array"
-	case string:
-		return "a string"
-	case bool:
-		return "a boolean"
-	case nil:
-		return "null"
-	}
-	return "a number"
 }
