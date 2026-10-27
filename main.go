@@ -3,9 +3,11 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"github.com/promptctl/mock-anthropic/internal/command"
 	"github.com/promptctl/mock-anthropic/internal/coverage"
+	"github.com/promptctl/mock-anthropic/internal/login"
 	"github.com/promptctl/mock-anthropic/internal/serve"
 )
 
@@ -16,6 +18,7 @@ var stderr = command.NewLog(os.Stderr)
 var Commands = command.Commands{
 	"serve":    serve.Command(os.Stdout, stderr),
 	"coverage": coverage.Command(os.Stdout),
+	"login":    login.Command(time.Now),
 }
 
 func main() {
