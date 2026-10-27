@@ -167,8 +167,11 @@ var portText = regexp.MustCompile(`^\d{1,5}$`)
 
 // Port is a port number given as text, from min to 65535.
 func Port(given, text string, min int) (int, error) {
-	n, err := strconv.Atoi(text)
-	if !portText.MatchString(text) || err != nil || n < min || n > 65535 {
+	n := 0
+	if portText.MatchString(text) {
+		n, _ = strconv.Atoi(text) // one to five digits: cannot fail
+	}
+	if !portText.MatchString(text) || n < min || n > 65535 {
 		return 0, &command.UsageError{Why: fmt.Sprintf("%s %q: not a port number from %d to 65535", given, text, min)}
 	}
 	return n, nil

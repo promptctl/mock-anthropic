@@ -121,9 +121,14 @@ func TestTheConfigDirIsPrintedNFC(t *testing.T) {
 	}
 }
 
-func TestACarriageReturnHasNoOneLineRendering(t *testing.T) {
-	if _, err := Render(Variable{"X", "a\rb"}); err == nil {
-		t.Error("a carriage return was rendered")
+func TestALineBreakHasNoOneLineRendering(t *testing.T) {
+	for _, v := range []string{"a\rb", "a\nb"} {
+		if _, err := Render(Variable{"X", v}); err == nil {
+			t.Errorf("%q was rendered", v)
+		}
+	}
+	if line, err := Render(Variable{"X", "a\tb"}); err != nil || line != "X='a\tb'" {
+		t.Errorf("a tab: %q, %v", line, err)
 	}
 }
 

@@ -7,13 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/promptctl/mock-anthropic/internal/cmdline"
 	"github.com/promptctl/mock-anthropic/internal/command"
+	"github.com/promptctl/mock-anthropic/internal/server"
 )
 
 // Variable is one environment variable to set.
@@ -22,7 +23,7 @@ type Variable struct{ Name, Value string }
 // Variables is what an instance sets to reach the mock: the proxy variables in both cases (Claude Code
 // and the tools it runs read either), the mock's CA, and the config directory `login` wrote.
 func Variables(port int, ca, configDir string) []Variable {
-	proxy := "http://127.0.0.1:" + strconv.Itoa(port)
+	proxy := "http://" + net.JoinHostPort(server.Loopback, strconv.Itoa(port))
 	return []Variable{
 		{"HTTPS_PROXY", proxy}, {"HTTP_PROXY", proxy},
 		{"https_proxy", proxy}, {"http_proxy", proxy},
@@ -34,10 +35,10 @@ func Variables(port int, ca, configDir string) []Variable {
 var plain = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
 // Render is v as one line a shell reads back to the same value: a value is single-quoted unless it is
-// made only of characters no shell treats specially. A control character (a newline, a carriage return) has no one-line rendering.
+// made only of characters no shell treats specially. A line break (newline or carriage return) has no one-line rendering.
 func Render(v Variable) (string, error) {
-	if strings.IndexFunc(v.Value, unicode.IsControl) >= 0 {
-		return "", &command.UsageError{Why: fmt.Sprintf("%s: a path holding a control character cannot be one line", v.Name)}
+	if strings.ContainsAny(v.Value, "\r\n") {
+		return "", &command.UsageError{Why: fmt.Sprintf("%s: a path holding a line break cannot be one line", v.Name)}
 	}
 	if plain.MatchString(v.Value) {
 		return v.Name + "=" + v.Value, nil

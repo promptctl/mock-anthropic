@@ -447,3 +447,11 @@ func TestEnvPrintsTheVariablesAndRecordsThem(t *testing.T) {
 		t.Errorf("facts %v", facts)
 	}
 }
+
+func TestEnvWithoutItsFlagsIsAUsageRecord(t *testing.T) {
+	f := run(t, "env")
+	if f.exit != 2 || f.stdout != "" {
+		t.Errorf("exit %d, stdout %q; want 2 and nothing", f.exit, f.stdout)
+	}
+	expect(t, f.record, map[string]any{"outcome": "usage", "exit": 2, "why": "missing --port", "ended_by": nil})
+}
