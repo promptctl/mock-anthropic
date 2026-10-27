@@ -55,7 +55,8 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			certs := s.Certificates()
 			// [LAW:nothing-unseen] Which account won (null: the default), and where each certificate came
 			// from. What ended the run is the dispatcher's to record. Learned before serving, so a second
-			// signal at any point after this still finds them on the record.
+			// signal at any point after this still finds them on the record. Learning is the one channel: the
+			// dispatcher keeps what was learned on every ending.
 			facts := command.Facts{
 				"port":         s.Port(),
 				"ca":           certs.CA.CertPath,
@@ -78,7 +79,7 @@ func Command(stdout io.Writer, stderr *command.Log) command.Command {
 			}
 			<-ctx.Done()
 			s.Stop()
-			return command.Result{Answer: command.OK, Facts: facts}, nil
+			return command.Result{Answer: command.OK}, nil
 		},
 	}
 }

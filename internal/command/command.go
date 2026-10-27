@@ -198,9 +198,6 @@ type learnedFacts struct {
 func (l *learnedFacts) add(f Facts) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.facts == nil {
-		l.facts = Facts{}
-	}
 	for k, v := range f {
 		l.facts[k] = v
 	}
@@ -248,7 +245,7 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 		case <-ended: // the invocation has its record already; nothing is left to end
 		}
 	}
-	var learned learnedFacts
+	learned := learnedFacts{facts: Facts{}}
 	done := make(chan settled, 1)
 	go func() {
 		returned := false
@@ -294,16 +291,19 @@ func invoke(commands Commands, argv []string, stderr io.Writer, signals <-chan o
 				ends = append(ends, end{name: "crash", crash: s.crash})
 				return failed(ends, nil, learned.all()), ends
 			}
+			// What Run returns is the last thing it learned; one record, whichever way the command ended.
+			learned.add(s.result.Facts)
+			facts := learned.all()
 			var usageErr *UsageError
 			switch {
 			case s.err != nil && len(ends) == 0 && errors.As(s.err, &usageErr):
 				return usage(commands, stderr, usageErr.Why), ends
 			case s.err != nil || slices.ContainsFunc(ends, func(e end) bool { return e.crash != "" }):
-				return failed(ends, s.err, s.result.Facts), ends
+				return failed(ends, s.err, facts), ends
 			case s.result.Answer != OK && s.result.Answer != No:
-				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), s.result.Facts), ends
+				return failed(ends, fmt.Errorf("command answered %q, not ok or no", s.result.Answer), facts), ends
 			}
-			return ending{Outcome: s.result.Answer, Facts: s.result.Facts}, ends
+			return ending{Outcome: s.result.Answer, Facts: facts}, ends
 		}
 	}
 }

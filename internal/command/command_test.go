@@ -214,6 +214,15 @@ func TestSecondSignalKeepsWhatTheServiceLearned(t *testing.T) {
 	expect(t, record, map[string]any{"outcome": "failed", "facts": map[string]any{"port": 7, "ca": "b"}})
 }
 
+func TestErrorReturnKeepsWhatTheCommandLearned(t *testing.T) {
+	service := Commands{"stand_in": {Kind: Service, Run: func(_ context.Context, _ []string, _ func(error), learn func(Facts)) (Result, error) {
+		learn(Facts{"port": 7})
+		return Result{}, errors.New("no ready line")
+	}}}
+	_, record, _ := run(t, service, []string{"stand_in"}, nil)
+	expect(t, record, map[string]any{"outcome": "failed", "why": "no ready line", "facts": map[string]any{"port": 7}})
+}
+
 func TestCommandWithNoKindFails(t *testing.T) {
 	exit, record, _ := run(t, Commands{"stand_in": {Run: func(context.Context, []string, func(error), func(Facts)) (Result, error) {
 		return Result{Answer: OK}, nil
